@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          latest="$(ls /Applications | grep -E '^Xcode' | sort -V | tail -1)"
+          echo "Using ${latest}"
+          sudo xcode-select -s "/Applications/${latest}/Contents/Developer"
+          swift --version
+          xcodebuild -version
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build app
+        env:
+          VERSION: ${{ github.ref_name }}
+          BUNDLE_VERSION: ${{ github.run_number }}
+        run: ./scripts/build-app.sh
+
+      - name: Pack release zip
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          ASSET="Mac-Mobile-Dev-Helper-${VERSION}.zip"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/Mac Mobile Dev Helper.app" \
+            "$ASSET"
+          shasum -a 256 "$ASSET" > "${ASSET}.sha256"
+          echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
+          echo "CHECKSUM=${ASSET}.sha256" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ASSET }}
+            ${{ env.CHECKSUM }}
+          generate_release_notes: true
