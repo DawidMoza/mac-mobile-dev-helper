@@ -1,26 +1,77 @@
 import Foundation
 
+struct AppUpdateHTTPResponse: Sendable {
+    let statusCode: Int
+    let data: Data
+    let locationHeader: String?
+}
+
 protocol AppUpdateNetworking: Sendable {
-    func data(from url: URL) async throws -> Data
+    func perform(_ request: URLRequest, followRedirects: Bool) async throws -> AppUpdateHTTPResponse
 }
 
 struct URLSessionAppUpdateNetworking: AppUpdateNetworking {
-    func data(from url: URL) async throws -> Data {
-        var request = URLRequest(url: url)
-        request.setValue("mac-mobile-dev-helper", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 20
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw AppUpdateError.network("GitHub returned HTTP \(http.statusCode).")
+    func perform(
+        _ request: URLRequest,
+        followRedirects: Bool
+    ) async throws -> AppUpdateHTTPResponse {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.httpAdditionalHeaders = [
+            "User-Agent": "mac-mobile-dev-helper"
+        ]
+
+        if followRedirects {
+            let (data, response) = try await URLSession(configuration: configuration).data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw AppUpdateError.network("GitHub returned an unexpected response.")
+            }
+            return AppUpdateHTTPResponse(
+                statusCode: http.statusCode,
+                data: data,
+                locationHeader: http.value(forHTTPHeaderField: "Location")
+            )
         }
-        return data
+
+        let delegate = RedirectBlockingDelegate()
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AppUpdateError.network("GitHub returned an unexpected response.")
+        }
+        return AppUpdateHTTPResponse(
+            statusCode: http.statusCode,
+            data: data,
+            locationHeader: http.value(forHTTPHeaderField: "Location") ?? delegate.redirectLocation
+        )
+    }
+}
+
+private final class RedirectBlockingDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    var redirectLocation: String?
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        redirectLocation = request.url?.absoluteString
+            ?? response.value(forHTTPHeaderField: "Location")
+        return nil
     }
 }
 
 actor AppUpdateService {
     static let repositorySlug = "DawidMoza/mac-mobile-dev-helper"
     static let repositoryURL = URL(string: "https://github.com/DawidMoza/mac-mobile-dev-helper.git")!
+    static let publicLatestReleaseURL = URL(
+        string: "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/latest"
+    )!
+    static let apiLatestReleaseURL = URL(
+        string: "https://api.github.com/repos/DawidMoza/mac-mobile-dev-helper/releases/latest"
+    )!
 
     private let networking: any AppUpdateNetworking
     private let fileManager: FileManager
@@ -45,18 +96,29 @@ actor AppUpdateService {
     }
 
     func latestRelease() async throws -> AppReleaseInfo {
-        let url = URL(
-            string: "https://api.github.com/repos/\(Self.repositorySlug)/releases/latest"
-        )!
-        let data: Data
+        var failures: [String] = []
+
         do {
-            data = try await networking.data(from: url)
-        } catch let error as AppUpdateError {
-            throw error
+            return try await latestReleaseFromPublicRedirect()
         } catch {
-            throw AppUpdateError.network(error.localizedDescription)
+            failures.append(error.localizedDescription)
         }
-        return try Self.parseLatestRelease(data)
+
+        do {
+            return try await latestReleaseFromAPI()
+        } catch {
+            failures.append(error.localizedDescription)
+        }
+
+        do {
+            return try await latestReleaseFromGitTags()
+        } catch {
+            failures.append(error.localizedDescription)
+        }
+
+        throw AppUpdateError.network(
+            "Could not check for updates. \(failures.joined(separator: " "))"
+        )
     }
 
     func checkForUpdate(
@@ -170,6 +232,136 @@ actor AppUpdateService {
 
         _ = try AppVersion(tag)
         return AppReleaseInfo(tag: tag, htmlURL: htmlURL, publishedAt: publishedAt)
+    }
+
+    static func parseLatestTag(fromRedirectLocation location: String) throws -> String {
+        guard let url = URL(string: location) else {
+            throw AppUpdateError.latestReleaseUnavailable
+        }
+        let parts = url.path.split(separator: "/")
+        guard
+            let tagIndex = parts.firstIndex(of: "tag"),
+            parts.index(after: tagIndex) < parts.endIndex
+        else {
+            throw AppUpdateError.latestReleaseUnavailable
+        }
+        let tag = String(parts[parts.index(after: tagIndex)])
+        _ = try AppVersion(tag)
+        return tag
+    }
+
+    static func parseNewestTag(fromGitRemoteOutput output: String) throws -> String {
+        let tags = output
+            .split(whereSeparator: \.isNewline)
+            .compactMap { line -> String? in
+                let columns = line.split(whereSeparator: \.isWhitespace)
+                guard let ref = columns.last, ref.hasPrefix("refs/tags/") else {
+                    return nil
+                }
+                return String(ref.dropFirst("refs/tags/".count))
+            }
+            .compactMap { tag -> (AppVersion, String)? in
+                guard let version = try? AppVersion(tag) else {
+                    return nil
+                }
+                return (version, version.original)
+            }
+            .sorted { $0.0 > $1.0 }
+
+        guard let newest = tags.first?.1 else {
+            throw AppUpdateError.latestReleaseUnavailable
+        }
+        return newest
+    }
+
+    private func latestReleaseFromPublicRedirect() async throws -> AppReleaseInfo {
+        var request = URLRequest(url: Self.publicLatestReleaseURL)
+        request.httpMethod = "HEAD"
+        request.setValue("mac-mobile-dev-helper", forHTTPHeaderField: "User-Agent")
+
+        let response: AppUpdateHTTPResponse
+        do {
+            response = try await networking.perform(request, followRedirects: false)
+        } catch let error as AppUpdateError {
+            throw error
+        } catch {
+            throw AppUpdateError.network(error.localizedDescription)
+        }
+
+        guard
+            (300...399).contains(response.statusCode),
+            let location = response.locationHeader,
+            !location.isEmpty
+        else {
+            throw AppUpdateError.network(
+                "GitHub release redirect failed (HTTP \(response.statusCode))."
+            )
+        }
+
+        let tag = try Self.parseLatestTag(fromRedirectLocation: location)
+        return AppReleaseInfo(
+            tag: tag,
+            htmlURL: URL(string: location) ?? Self.publicLatestReleaseURL,
+            publishedAt: nil
+        )
+    }
+
+    private func latestReleaseFromAPI() async throws -> AppReleaseInfo {
+        var request = URLRequest(url: Self.apiLatestReleaseURL)
+        request.setValue("mac-mobile-dev-helper", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        let response: AppUpdateHTTPResponse
+        do {
+            response = try await networking.perform(request, followRedirects: true)
+        } catch let error as AppUpdateError {
+            throw error
+        } catch {
+            throw AppUpdateError.network(error.localizedDescription)
+        }
+
+        guard (200...299).contains(response.statusCode) else {
+            if response.statusCode == 403 {
+                throw AppUpdateError.network(
+                    "GitHub API rate limit reached (HTTP 403). Retry later or use git tags."
+                )
+            }
+            throw AppUpdateError.network("GitHub returned HTTP \(response.statusCode).")
+        }
+        return try Self.parseLatestRelease(response.data)
+    }
+
+    private func latestReleaseFromGitTags() async throws -> AppReleaseInfo {
+        let executable = try resolveExecutable("git")
+        let result = try await processRunner.run(
+            executableURL: executable,
+            arguments: [
+                "ls-remote",
+                "--tags",
+                "--refs",
+                Self.repositoryURL.absoluteString
+            ],
+            timeout: 30,
+            maximumOutputSize: 1_048_576
+        )
+        guard result.exitCode == 0 else {
+            let stderr = String(decoding: result.stderr, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw AppUpdateError.network(
+                stderr.isEmpty ? "git ls-remote failed." : stderr
+            )
+        }
+
+        let tag = try Self.parseNewestTag(
+            fromGitRemoteOutput: String(decoding: result.stdout, as: UTF8.self)
+        )
+        return AppReleaseInfo(
+            tag: tag,
+            htmlURL: URL(
+                string: "https://github.com/\(Self.repositorySlug)/releases/tag/\(tag)"
+            ),
+            publishedAt: nil
+        )
     }
 
     private func requireTools() throws {

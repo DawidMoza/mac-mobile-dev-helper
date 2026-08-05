@@ -31,6 +31,39 @@ final class AppUpdateServiceTests: XCTestCase {
         XCTAssertNotNil(release.publishedAt)
     }
 
+    func testParseLatestTagFromRedirectLocation() throws {
+        XCTAssertEqual(
+            try AppUpdateService.parseLatestTag(
+                fromRedirectLocation: "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v0.1.6"
+            ),
+            "v0.1.6"
+        )
+    }
+
+    func testParseNewestTagFromGitRemoteOutput() throws {
+        let output = """
+        abc123\trefs/tags/v0.1.0
+        def456\trefs/tags/v0.1.6
+        aaa111\trefs/tags/v0.1.5
+        """
+        XCTAssertEqual(try AppUpdateService.parseNewestTag(fromGitRemoteOutput: output), "v0.1.6")
+    }
+
+    func testLatestReleaseFallsBackWhenPublicRedirectFails() async throws {
+        let networking = FakeAppUpdateNetworking(
+            response: """
+            {
+              "tag_name": "v0.2.1",
+              "html_url": "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v0.2.1"
+            }
+            """,
+            publicRedirectStatus: 403
+        )
+        let service = AppUpdateService(networking: networking)
+        let release = try await service.latestRelease()
+        XCTAssertEqual(release.tag, "v0.2.1")
+    }
+
     func testCheckForUpdateDetectsNewerRelease() async throws {
         let networking = FakeAppUpdateNetworking(
             response: """
@@ -117,9 +150,32 @@ final class AppUpdateServiceTests: XCTestCase {
 
 private struct FakeAppUpdateNetworking: AppUpdateNetworking {
     let response: String
+    var publicRedirectStatus: Int = 302
 
-    func data(from url: URL) async throws -> Data {
-        Data(response.utf8)
+    func perform(
+        _ request: URLRequest,
+        followRedirects: Bool
+    ) async throws -> AppUpdateHTTPResponse {
+        let url = request.url?.absoluteString ?? ""
+        let tag = (
+            try? JSONSerialization.jsonObject(with: Data(response.utf8)) as? [String: Any]
+        )?["tag_name"] as? String ?? "v0.0.0"
+
+        if url.contains("/releases/latest"), !url.contains("api.github.com") {
+            return AppUpdateHTTPResponse(
+                statusCode: publicRedirectStatus,
+                data: Data(),
+                locationHeader: publicRedirectStatus == 302
+                    ? "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/\(tag)"
+                    : nil
+            )
+        }
+
+        return AppUpdateHTTPResponse(
+            statusCode: 200,
+            data: Data(response.utf8),
+            locationHeader: nil
+        )
     }
 }
 
