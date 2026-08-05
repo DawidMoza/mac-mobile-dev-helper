@@ -92,17 +92,35 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.top, 6)
-                } else if updateModel.availableUpdate != nil {
-                    Button(updateModel.updateButtonTitle) {
-                        updateModel.requestUpdate()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .padding(.top, 4)
                 } else {
-                    Text(updateModel.currentVersionText)
-                        .font(.callout.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 8)
+                    HStack(spacing: 10) {
+                        Button("Check for Updates") {
+                            Task {
+                                await updateModel.checkForUpdates(
+                                    force: true,
+                                    showUpToDateMessage: true
+                                )
+                            }
+                        }
+                        .disabled(updateModel.isChecking)
+
+                        if updateModel.isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+
+                        if updateModel.availableUpdate != nil {
+                            Button(updateModel.updateButtonTitle) {
+                                updateModel.requestUpdate()
+                            }
+                            .buttonStyle(.borderedProminent)
+                        } else {
+                            Text(updateModel.currentVersionText)
+                                .font(.callout.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.top, 4)
                 }
             }
         }

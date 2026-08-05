@@ -84,7 +84,7 @@ Tests use isolated temporary directories and never scan or delete real developer
 
 The app checks GitHub for a newer release at startup and again at most once per day. If an update exists, a top-right button like **Update v0.1.4 -> v0.1.5** appears. Choosing it clones that tag, builds with Swift, replaces the running app bundle, and relaunches.
 
-**Mac Mobile Dev Helper → Check for Updates…** always checks immediately. Updating requires network access plus Xcode Command Line Tools (`git` and `swift`).
+Use the top-right **Check for Updates** button (left of the version), or **Mac Mobile Dev Helper → Check for Updates…**, to check immediately. Updating requires network access plus Xcode Command Line Tools (`git` and `swift`).
 
 ## Release
 
