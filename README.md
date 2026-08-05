@@ -2,6 +2,26 @@
 
 A small native macOS utility for Android device files, mobile-development cleanup, and system diagnostics. Each feature is presented in a collapsible section.
 
+## Install
+
+Build from source and install into `/Applications` with one Terminal command:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install.sh | bash
+```
+
+Requirements:
+
+- macOS 13 or newer
+- Xcode command-line tools with Swift 6
+- Android SDK Platform-Tools for the Android filesystem feature
+
+To install a specific tagged version:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install.sh | bash -s -- v0.1.3
+```
+
 ## Features
 
 ### Android filesystem browser and editor
@@ -39,12 +59,6 @@ Every cleanup requires confirmation and displays the exact paths that will be pe
 - Shows healthy, elevated, or critical pressure at a glance
 - Offers a confirmed system restart only when usage reaches the critical 85% threshold
 
-## Requirements
-
-- macOS 13 or newer
-- Xcode command-line tools with Swift 6
-- Android SDK Platform-Tools for the Android filesystem feature
-
 ## Run from Xcode
 
 Open `Package.swift` in Xcode and run the `MobileDevHelper` executable.
@@ -68,35 +82,12 @@ Tests use isolated temporary directories and never scan or delete real developer
 
 ## Release
 
-Pushing a version tag such as `v0.1.0` runs GitHub Actions, builds the ad-hoc signed app on macOS, and attaches a downloadable zip to a GitHub Release:
+Pushing a version tag such as `v0.1.3` runs tests and publishes GitHub Release notes. Distribution is source-only via the Terminal installer above — no downloadable app zip is attached.
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.3
+git push origin v0.1.3
 ```
-
-The release artifact is `Mac-Mobile-Dev-Helper-vX.Y.Z.zip` with a matching `.sha256` checksum. The app version in `Info.plist` comes from the tag.
-
-### Opening a downloaded release
-
-Release builds are ad-hoc signed and not Apple-notarized. After download, macOS may say it cannot verify the software and may move the app to Trash. Helper scripts inside the zip are quarantined too, so use Terminal:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install-release.sh | bash
-```
-
-That downloads the latest release, clears quarantine, installs into `/Applications`, and launches the app.
-
-If you already unpacked the zip:
-
-```sh
-xattr -dr com.apple.quarantine "Mac Mobile Dev Helper.app"
-open "Mac Mobile Dev Helper.app"
-```
-
-Or open **System Settings → Privacy & Security → Open Anyway**.
-
-Local builds from `./scripts/build-app.sh` are not quarantined and open normally.
 
 ## License
 

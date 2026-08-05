@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  test-and-release:
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -26,45 +26,23 @@ jobs:
       - name: Run tests
         run: swift test
 
-      - name: Build app
-        env:
-          VERSION: ${{ github.ref_name }}
-          BUNDLE_VERSION: ${{ github.run_number }}
-        run: ./scripts/build-app.sh
-
-      - name: Pack release zip
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: |
-          ./scripts/package-release.sh
-          ASSET="dist/Mac-Mobile-Dev-Helper-${GITHUB_REF_NAME}.zip"
-          echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
-          echo "CHECKSUM=${ASSET}.sha256" >> "$GITHUB_ENV"
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            ${{ env.ASSET }}
-            ${{ env.CHECKSUM }}
           generate_release_notes: true
           body: |
             ## Install
 
-            macOS Gatekeeper blocks ad-hoc signed apps downloaded from the internet, including helper `.command` files in the zip. Use Terminal instead:
+            Build and install from source with Terminal:
 
             ```sh
-            curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install-release.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install.sh | bash
             ```
 
-            That installs into `/Applications`, clears quarantine, and launches the app.
+            Requirements: macOS 13+, Xcode Command Line Tools / Swift 6.
 
-            If you already unpacked the zip:
+            To install this exact tag:
 
             ```sh
-            xattr -dr com.apple.quarantine "Mac Mobile Dev Helper.app"
-            open "Mac Mobile Dev Helper.app"
+            curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install.sh | bash -s -- ${{ github.ref_name }}
             ```
-
-            Or use System Settings → Privacy & Security → Open Anyway.
-
