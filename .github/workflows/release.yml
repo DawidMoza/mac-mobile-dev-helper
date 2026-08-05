@@ -33,13 +33,11 @@ jobs:
         run: ./scripts/build-app.sh
 
       - name: Pack release zip
+        env:
+          VERSION: ${{ github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME}"
-          ASSET="Mac-Mobile-Dev-Helper-${VERSION}.zip"
-          ditto -c -k --sequesterRsrc --keepParent \
-            "dist/Mac Mobile Dev Helper.app" \
-            "$ASSET"
-          shasum -a 256 "$ASSET" > "${ASSET}.sha256"
+          ./scripts/package-release.sh
+          ASSET="dist/Mac-Mobile-Dev-Helper-${GITHUB_REF_NAME}.zip"
           echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
           echo "CHECKSUM=${ASSET}.sha256" >> "$GITHUB_ENV"
 
@@ -50,3 +48,19 @@ jobs:
             ${{ env.ASSET }}
             ${{ env.CHECKSUM }}
           generate_release_notes: true
+          body: |
+            ## Download
+
+            Unpack the zip, then double-click **Open First Time.command**.
+
+            macOS Gatekeeper blocks ad-hoc signed apps downloaded from the internet. That helper removes the quarantine flag and launches the app.
+
+            Manual alternative:
+
+            ```sh
+            xattr -dr com.apple.quarantine "Mac Mobile Dev Helper.app"
+            open "Mac Mobile Dev Helper.app"
+            ```
+
+            Or use System Settings → Privacy & Security → Open Anyway.
+
