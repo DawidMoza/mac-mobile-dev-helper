@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = CleanupViewModel()
+    @StateObject private var updateModel = AppUpdateViewModel()
     @State private var isConfirmingCleanup = false
     @State private var isAndroidFilesystemExpanded = true
     @State private var isCleanupExpanded = true
@@ -11,6 +12,9 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                if updateModel.availableUpdate != nil || updateModel.isUpdating {
+                    updateBanner
+                }
                 androidFilesystemFeature
                 cleanupFeature
                 portsFeature
@@ -19,7 +23,14 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 720)
         .task {
-            await model.refresh()
+            async let cleanup: Void = model.refresh()
+            async let updates: Void = updateModel.checkForUpdates()
+            _ = await (cleanup, updates)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .checkForAppUpdates)) { _ in
+            Task {
+                await updateModel.checkForUpdates(showUpToDateMessage: true)
+            }
         }
         .sheet(isPresented: $isConfirmingCleanup) {
             CleanupConfirmationView(
@@ -35,7 +46,24 @@ struct ContentView: View {
                 }
             )
         }
+        .alert("Install update and relaunch?", isPresented: $updateModel.isConfirmingUpdate) {
+            Button("Cancel", role: .cancel) {}
+            Button("Update", role: .destructive) {
+                updateModel.confirmUpdate()
+            }
+        } message: {
+            Text(
+                "Mac Mobile Dev Helper will clone \(updateModel.availableUpdate?.latestRelease.tag ?? "the latest tag") from GitHub, build it with Swift, replace this app, and relaunch. Xcode Command Line Tools are required."
+            )
+        }
         .alert(item: $model.message) { message in
+            Alert(
+                title: Text(message.title),
+                message: Text(message.body),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+        .alert(item: $updateModel.message) { message in
             Alert(
                 title: Text(message.title),
                 message: Text(message.body),
@@ -45,12 +73,52 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Mac Mobile Dev Helper")
-                .font(.largeTitle.bold())
-            Text("Android device files, storage cleanup, and macOS development diagnostics.")
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Mac Mobile Dev Helper")
+                    .font(.largeTitle.bold())
+                Text("Android device files, storage cleanup, and macOS development diagnostics.")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(updateModel.currentVersionText)
+                .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
+                .padding(.top, 8)
         }
+    }
+
+    private var updateBanner: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: updateModel.isUpdating ? "arrow.triangle.2.circlepath" : "arrow.down.app")
+                .foregroundStyle(.blue)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(
+                    updateModel.isUpdating
+                        ? "Updating…"
+                        : "Update available"
+                )
+                .font(.headline)
+                if let statusText = updateModel.statusText {
+                    Text(statusText)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if updateModel.isUpdating || updateModel.isChecking {
+                ProgressView()
+                    .controlSize(.small)
+            }
+            if updateModel.availableUpdate != nil, !updateModel.isUpdating {
+                Button(updateModel.updateButtonTitle) {
+                    updateModel.requestUpdate()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(14)
+        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var androidFilesystemFeature: some View {

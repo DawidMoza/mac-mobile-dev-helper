@@ -80,13 +80,19 @@ swift test
 
 Tests use isolated temporary directories and never scan or delete real developer files.
 
+## Updates
+
+On launch, the app checks the latest GitHub release. If a newer tag exists, an **Update** button appears in the header. Choosing it clones that tag, builds with Swift, replaces the running app bundle, and relaunches.
+
+You can also use **Mac Mobile Dev Helper → Check for Updates…**. Updating requires network access plus Xcode Command Line Tools (`git` and `swift`).
+
 ## Release
 
-Pushing a version tag such as `v0.1.3` runs tests and publishes GitHub Release notes. Distribution is source-only via the Terminal installer above — no downloadable app zip is attached.
+Pushing a version tag such as `v0.1.4` runs tests and publishes GitHub Release notes. Distribution is source-only via the Terminal installer above — no downloadable app zip is attached.
 
 ```sh
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 ## License
