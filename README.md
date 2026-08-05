@@ -79,19 +79,22 @@ The release artifact is `Mac-Mobile-Dev-Helper-vX.Y.Z.zip` with a matching `.sha
 
 ### Opening a downloaded release
 
-Release builds are ad-hoc signed and not Apple-notarized. After download, macOS may say it cannot verify the software and may move the app to Trash.
+Release builds are ad-hoc signed and not Apple-notarized. After download, macOS may say it cannot verify the software and may move the app to Trash. Helper scripts inside the zip are quarantined too, so use Terminal:
 
-After unpacking the zip:
+```sh
+curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install-release.sh | bash
+```
 
-1. Double-click **Open First Time.command** and allow Terminal if prompted.
-2. Or clear the quarantine flag yourself:
+That downloads the latest release, clears quarantine, installs into `/Applications`, and launches the app.
+
+If you already unpacked the zip:
 
 ```sh
 xattr -dr com.apple.quarantine "Mac Mobile Dev Helper.app"
 open "Mac Mobile Dev Helper.app"
 ```
 
-3. Or open **System Settings → Privacy & Security → Open Anyway**.
+Or open **System Settings → Privacy & Security → Open Anyway**.
 
 Local builds from `./scripts/build-app.sh` are not quarantined and open normally.
 

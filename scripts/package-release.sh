@@ -24,42 +24,25 @@ rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 ditto "$APP_DIR" "$STAGE_DIR/$APP_NAME.app"
 
-cat > "$STAGE_DIR/Open First Time.command" <<'COMMAND'
-#!/bin/bash
-set -euo pipefail
-cd "$(dirname "$0")"
-APP="Mac Mobile Dev Helper.app"
+cat > "$STAGE_DIR/INSTALL.txt" <<EOF
+Mac Mobile Dev Helper ${VERSION}
 
-if [[ ! -d "$APP" ]]; then
-  osascript -e 'display alert "Mac Mobile Dev Helper" message "Could not find Mac Mobile Dev Helper.app next to this script." as critical'
-  exit 1
-fi
+macOS blocks unsigned/ad-hoc apps downloaded from the internet. Double-clicking
+the .app (or any helper script in this zip) can fail or send it to Trash.
 
-# Downloads from the internet get a quarantine flag. Ad-hoc signed open-source
-# builds are not notarized by Apple, so macOS may refuse to open them until that
-# flag is removed.
-xattr -dr com.apple.quarantine "$APP" 2>/dev/null || true
-open "$APP"
-COMMAND
-chmod +x "$STAGE_DIR/Open First Time.command"
+Recommended install from Terminal:
 
-cat > "$STAGE_DIR/README.txt" <<'README'
-Mac Mobile Dev Helper
+  curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install-release.sh | bash
 
-If macOS says it cannot check for malicious software, or moves the app to Trash:
+That downloads the release, clears quarantine, installs to /Applications, and opens it.
 
-1. Double-click "Open First Time.command" and allow Terminal if prompted.
-   or
-2. In Terminal, run:
-   xattr -dr com.apple.quarantine "Mac Mobile Dev Helper.app"
-   open "Mac Mobile Dev Helper.app"
-   or
-3. Open System Settings → Privacy & Security → Open Anyway.
+If you already unpacked this zip, clear quarantine manually:
 
-The release build is ad-hoc signed and not notarized by Apple. That is expected
-for this open-source distribution. Builds you create locally with
-./scripts/build-app.sh do not need this step.
-README
+  xattr -dr com.apple.quarantine "${APP_NAME}.app"
+  open "${APP_NAME}.app"
+
+Or use System Settings → Privacy & Security → Open Anyway after macOS blocks it.
+EOF
 
 rm -f "$ASSET_PATH"
 (

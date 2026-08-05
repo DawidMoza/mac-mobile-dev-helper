@@ -49,13 +49,17 @@ jobs:
             ${{ env.CHECKSUM }}
           generate_release_notes: true
           body: |
-            ## Download
+            ## Install
 
-            Unpack the zip, then double-click **Open First Time.command**.
+            macOS Gatekeeper blocks ad-hoc signed apps downloaded from the internet, including helper `.command` files in the zip. Use Terminal instead:
 
-            macOS Gatekeeper blocks ad-hoc signed apps downloaded from the internet. That helper removes the quarantine flag and launches the app.
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install-release.sh | bash
+            ```
 
-            Manual alternative:
+            That installs into `/Applications`, clears quarantine, and launches the app.
+
+            If you already unpacked the zip:
 
             ```sh
             xattr -dr com.apple.quarantine "Mac Mobile Dev Helper.app"
