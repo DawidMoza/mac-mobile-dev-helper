@@ -27,12 +27,49 @@ final class CleanupServiceTests: XCTestCase {
         try environment.createFile(at: environment.paths.cursorBackup, size: 1_024)
         try environment.createFile(at: environment.paths.activeCursorDatabase, size: 1_024)
 
+        try environment.createFile(
+            at: environment.paths.xcodeDerivedData
+                .appendingPathComponent("ModuleCache.noindex/module"),
+            size: 2_048
+        )
+        try environment.createFile(
+            at: environment.paths.xcodeDerivedData
+                .appendingPathComponent("CompilationCache.noindex/cache.bin"),
+            size: 1_024
+        )
+        try environment.createFile(
+            at: environment.paths.xcodeDerivedData
+                .appendingPathComponent("Demo-abcdef/Index/store"),
+            size: 4_096
+        )
+        try environment.createFile(
+            at: environment.paths.xcodeDocumentationIndex
+                .appendingPathComponent("DeveloperDocumentation.index/index"),
+            size: 512
+        )
+        try environment.createFile(
+            at: environment.paths.xcodeDocumentationCache
+                .appendingPathComponent("v1/doc"),
+            size: 256
+        )
+
         let snapshot = await CleanupService(paths: environment.paths).scan()
 
         XCTAssertEqual(snapshot.category(.coreDeviceDeltas).items.map(\.name), ["com.example.app"])
+        XCTAssertEqual(
+            snapshot.category(.xcodeDerivedData).items.map(\.name).sorted(),
+            [
+                "CompilationCache.noindex",
+                "Demo-abcdef",
+                "DocumentationCache",
+                "DocumentationIndex",
+                "ModuleCache.noindex"
+            ]
+        )
         XCTAssertEqual(snapshot.category(.mobileBuildTemporaryFiles).items.map(\.name), ["example.apk"])
         XCTAssertEqual(snapshot.category(.cursorBackup).items.map(\.name), ["state.vscdb.backup"])
         XCTAssertGreaterThan(snapshot.category(.coreDeviceDeltas).totalAllocatedSize, 0)
+        XCTAssertGreaterThan(snapshot.category(.xcodeDerivedData).totalAllocatedSize, 0)
         XCTAssertGreaterThan(snapshot.activeCursorDatabaseSize ?? 0, 0)
     }
 
@@ -47,6 +84,17 @@ final class CleanupServiceTests: XCTestCase {
         let ignoredFile = environment.paths.temporaryDirectory.appendingPathComponent("notes.txt")
         try environment.createFile(at: ignoredFile, size: 2_048)
         try environment.createFile(at: environment.paths.cursorBackup, size: 2_048)
+        let moduleCache = environment.paths.xcodeDerivedData
+            .appendingPathComponent("ModuleCache.noindex")
+        try environment.createFile(
+            at: moduleCache.appendingPathComponent("module"),
+            size: 2_048
+        )
+        try environment.createFile(
+            at: environment.paths.xcodeDocumentationIndex
+                .appendingPathComponent("index"),
+            size: 512
+        )
 
         let service = CleanupService(paths: environment.paths)
         let snapshot = await service.scan()
@@ -55,13 +103,38 @@ final class CleanupServiceTests: XCTestCase {
             .flatMap(\.items)
         let result = await service.clean(items: selectedItems)
 
-        XCTAssertEqual(result.removedCount, 2)
+        XCTAssertEqual(result.removedCount, 4)
         XCTAssertTrue(result.failures.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: coreApp.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryBuild.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: moduleCache.path))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: environment.paths.xcodeDocumentationIndex.path)
+        )
         XCTAssertTrue(FileManager.default.fileExists(atPath: environment.paths.coreDeviceDeltas.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: environment.paths.xcodeDerivedData.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: ignoredFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: environment.paths.cursorBackup.path))
+    }
+
+    func testCleanRejectsForgedXcodePathOutsideDerivedData() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+
+        let userData = environment.paths.homeDirectory
+            .appendingPathComponent("Library/Developer/Xcode/UserData/important.txt")
+        try environment.createFile(at: userData, size: 1_024)
+        let forgedItem = CleanupItem(
+            categoryID: .xcodeDerivedData,
+            path: userData.path,
+            allocatedSize: 1_024
+        )
+
+        let result = await CleanupService(paths: environment.paths).clean(items: [forgedItem])
+
+        XCTAssertEqual(result.removedCount, 0)
+        XCTAssertEqual(result.failures.count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: userData.path))
     }
 
     func testCleanRejectsForgedPathOutsideAllowlist() async throws {
@@ -123,6 +196,10 @@ private final class TestEnvironment {
             )
             try FileManager.default.createDirectory(
                 at: paths.cursorGlobalStorage,
+                withIntermediateDirectories: true
+            )
+            try FileManager.default.createDirectory(
+                at: paths.xcodeDerivedData,
                 withIntermediateDirectories: true
             )
         }

@@ -2,6 +2,7 @@ import Foundation
 
 enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
     case coreDeviceDeltas
+    case xcodeDerivedData
     case mobileBuildTemporaryFiles
     case cursorBackup
 
@@ -11,6 +12,8 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .coreDeviceDeltas:
             "CoreDevice installation deltas"
+        case .xcodeDerivedData:
+            "Xcode compilation caches & indexes"
         case .mobileBuildTemporaryFiles:
             "Mobile build temporary files"
         case .cursorBackup:
@@ -22,6 +25,8 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .coreDeviceDeltas:
             "Incremental physical-device installation caches. The next installation may be slower."
+        case .xcodeDerivedData:
+            "DerivedData build products, module/compilation caches, and Xcode documentation indexes. The next build or doc lookup may be slower."
         case .mobileBuildTemporaryFiles:
             "Recognized Android, iOS, and Godot build artifacts directly under /private/tmp."
         case .cursorBackup:
@@ -30,7 +35,7 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
     }
 
     var isSelectedByDefault: Bool {
-        self != .cursorBackup
+        false
     }
 }
 

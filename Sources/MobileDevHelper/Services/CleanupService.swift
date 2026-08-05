@@ -27,6 +27,21 @@ struct CleanupPaths: Sendable {
     var activeCursorDatabase: URL {
         cursorGlobalStorage.appendingPathComponent("state.vscdb")
     }
+
+    var xcodeDerivedData: URL {
+        homeDirectory
+            .appendingPathComponent("Library/Developer/Xcode/DerivedData", isDirectory: true)
+    }
+
+    var xcodeDocumentationCache: URL {
+        homeDirectory
+            .appendingPathComponent("Library/Developer/Xcode/DocumentationCache", isDirectory: true)
+    }
+
+    var xcodeDocumentationIndex: URL {
+        homeDirectory
+            .appendingPathComponent("Library/Developer/Xcode/DocumentationIndex", isDirectory: true)
+    }
 }
 
 actor CleanupService {
@@ -50,6 +65,7 @@ actor CleanupService {
             categoryID: .coreDeviceDeltas,
             matches: { _ in true }
         )
+        let xcodeCaches = scanXcodeCompilationCachesAndIndexes()
         let temporaryFiles = scanChildren(
             at: paths.temporaryDirectory,
             categoryID: .mobileBuildTemporaryFiles,
@@ -61,7 +77,7 @@ actor CleanupService {
         )
 
         return CleanupSnapshot(
-            categories: [coreDevice, temporaryFiles, cursorBackup],
+            categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup],
             activeCursorDatabaseSize: existingAllocatedSize(at: paths.activeCursorDatabase)
         )
     }
@@ -236,11 +252,64 @@ actor CleanupService {
         return Self.temporaryDirectoryPrefixes.contains { name.hasPrefix($0) }
     }
 
+    private func scanXcodeCompilationCachesAndIndexes() -> CleanupCategory {
+        let derivedData = scanChildren(
+            at: paths.xcodeDerivedData,
+            categoryID: .xcodeDerivedData,
+            matches: { _ in true }
+        )
+        let documentationCache = scanExistingDirectory(
+            at: paths.xcodeDocumentationCache,
+            categoryID: .xcodeDerivedData
+        )
+        let documentationIndex = scanExistingDirectory(
+            at: paths.xcodeDocumentationIndex,
+            categoryID: .xcodeDerivedData
+        )
+
+        return CleanupCategory(
+            id: .xcodeDerivedData,
+            items: (derivedData.items + documentationCache + documentationIndex)
+                .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending },
+            scanErrors: derivedData.scanErrors
+        )
+    }
+
+    private func scanExistingDirectory(
+        at url: URL,
+        categoryID: CleanupCategoryID
+    ) -> [CleanupItem] {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return []
+        }
+
+        do {
+            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+            guard values.isSymbolicLink != true, values.isDirectory == true else {
+                return []
+            }
+            return [
+                CleanupItem(
+                    categoryID: categoryID,
+                    path: url.path,
+                    allocatedSize: try allocatedSize(of: url)
+                )
+            ]
+        } catch {
+            return []
+        }
+    }
+
     private func isAllowedForDeletion(_ item: CleanupItem) -> Bool {
         let url = URL(fileURLWithPath: item.path).standardizedFileURL
         switch item.categoryID {
         case .coreDeviceDeltas:
             return url.deletingLastPathComponent().standardizedFileURL == paths.coreDeviceDeltas.standardizedFileURL
+        case .xcodeDerivedData:
+            let parent = url.deletingLastPathComponent().standardizedFileURL
+            return parent == paths.xcodeDerivedData.standardizedFileURL
+                || url == paths.xcodeDocumentationCache.standardizedFileURL
+                || url == paths.xcodeDocumentationIndex.standardizedFileURL
         case .mobileBuildTemporaryFiles:
             return url.deletingLastPathComponent().standardizedFileURL == paths.temporaryDirectory.standardizedFileURL
                 && isRecognizedTemporaryItem(url)

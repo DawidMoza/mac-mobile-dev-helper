@@ -45,10 +45,11 @@ ADB is discovered from `PATH`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the defaul
 ### Storage cleanup
 
 - Xcode/CoreDevice incremental app-installation deltas
+- Xcode DerivedData compilation products, module/compilation caches, and documentation indexes
 - Recognized Android, iOS, and Godot artifacts directly under `/private/tmp`
 - Cursor's inactive `state.vscdb.backup` file
 
-The active Cursor database, source repositories, DerivedData, simulators, Gradle caches, and Android SDK are never deleted. Cursor backup cleanup is deselected by default.
+The active Cursor database, source repositories, simulators, Gradle caches, and Android SDK are never deleted. All cleanup categories are deselected by default. Clearing Xcode caches makes the next build or documentation lookup slower.
 
 Every cleanup requires confirmation and displays the exact paths that will be permanently removed.
 
