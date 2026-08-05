@@ -66,6 +66,53 @@ final class AppUpdateServiceTests: XCTestCase {
 
         XCTAssertFalse(availability.isUpdateAvailable)
     }
+
+    func testUpdateButtonTitleFormat() throws {
+        let availability = AppUpdateAvailability(
+            currentVersion: try AppVersion("0.1.4"),
+            latestRelease: AppReleaseInfo(
+                tag: "v0.2.0",
+                htmlURL: URL(string: "https://example.com/v0.2.0"),
+                publishedAt: nil
+            )
+        )
+        XCTAssertEqual(
+            "Update \(availability.currentVersion.description) -> \(try availability.latestVersion.description)",
+            "Update v0.1.4 -> v0.2.0"
+        )
+    }
+
+    @MainActor
+    func testAutomaticChecksAreThrottledToOncePerDay() async {
+        let networking = FakeAppUpdateNetworking(
+            response: """
+            {
+              "tag_name": "v9.0.0",
+              "html_url": "https://example.com/v9.0.0"
+            }
+            """
+        )
+        let suiteName = "AppUpdateThrottleTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults.set(Date().timeIntervalSince1970, forKey: AppUpdateViewModel.lastCheckDefaultsKey)
+
+        let model = AppUpdateViewModel(
+            service: AppUpdateService(networking: networking),
+            defaults: defaults,
+            versionBundle: FakeVersionBundle(version: "0.1.4")
+        )
+        await model.checkForUpdatesIfNeeded()
+        XCTAssertNil(model.availableUpdate)
+
+        defaults.set(
+            Date().timeIntervalSince1970 - AppUpdateViewModel.automaticCheckInterval - 1,
+            forKey: AppUpdateViewModel.lastCheckDefaultsKey
+        )
+        await model.checkForUpdatesIfNeeded()
+        XCTAssertEqual(model.availableUpdate?.latestRelease.tag, "v9.0.0")
+        XCTAssertEqual(model.updateButtonTitle, "Update v0.1.4 -> v9.0.0")
+    }
 }
 
 private struct FakeAppUpdateNetworking: AppUpdateNetworking {

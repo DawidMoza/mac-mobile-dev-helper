@@ -11,6 +11,9 @@ final class AppUpdateViewModel: ObservableObject {
         var id: String { title + body }
     }
 
+    static let lastCheckDefaultsKey = "appUpdate.lastCheckAt"
+    static let automaticCheckInterval: TimeInterval = 24 * 60 * 60
+
     @Published private(set) var currentVersionText = "…"
     @Published private(set) var availableUpdate: AppUpdateAvailability?
     @Published private(set) var isChecking = false
@@ -20,10 +23,19 @@ final class AppUpdateViewModel: ObservableObject {
     @Published var message: Message?
 
     private let service: AppUpdateService
+    private let defaults: UserDefaults
+    private let versionBundle: Bundle
+    private var dailyCheckTask: Task<Void, Never>?
 
-    init(service: AppUpdateService = AppUpdateService()) {
+    init(
+        service: AppUpdateService = AppUpdateService(),
+        defaults: UserDefaults = .standard,
+        versionBundle: Bundle = .main
+    ) {
         self.service = service
-        if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+        self.defaults = defaults
+        self.versionBundle = versionBundle
+        if let version = versionBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
            !version.isEmpty {
             currentVersionText = version.hasPrefix("v") ? version : "v\(version)"
         } else {
@@ -31,31 +43,63 @@ final class AppUpdateViewModel: ObservableObject {
         }
     }
 
+    deinit {
+        dailyCheckTask?.cancel()
+    }
+
     var updateButtonTitle: String {
         guard let availableUpdate,
               let latest = try? availableUpdate.latestVersion else {
             return "Update"
         }
-        return "Update to \(latest.description)"
+        return "Update \(availableUpdate.currentVersion.description) -> \(latest.description)"
     }
 
-    func checkForUpdates(showUpToDateMessage: Bool = false) async {
+    func startAutomaticUpdateChecks() {
+        dailyCheckTask?.cancel()
+        dailyCheckTask = Task { [weak self] in
+            await self?.checkForUpdatesIfNeeded()
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(Self.automaticCheckInterval))
+                } catch {
+                    return
+                }
+                await self?.checkForUpdatesIfNeeded()
+            }
+        }
+    }
+
+    func checkForUpdatesIfNeeded() async {
+        guard shouldAutomaticallyCheck else {
+            return
+        }
+        await checkForUpdates(force: false, showUpToDateMessage: false)
+    }
+
+    func checkForUpdates(
+        force: Bool = true,
+        showUpToDateMessage: Bool = false
+    ) async {
         guard !isChecking, !isUpdating else {
             return
         }
+        if !force, !shouldAutomaticallyCheck {
+            return
+        }
+
         isChecking = true
         statusText = nil
         defer { isChecking = false }
 
         do {
-            let availability = try await service.checkForUpdate()
+            let availability = try await service.checkForUpdate(bundle: versionBundle)
+            defaults.set(Date().timeIntervalSince1970, forKey: Self.lastCheckDefaultsKey)
             currentVersionText = availability.currentVersion.description
             if availability.isUpdateAvailable {
                 availableUpdate = availability
-                statusText = "Version \(availability.latestRelease.tag) is available."
             } else {
                 availableUpdate = nil
-                statusText = nil
                 if showUpToDateMessage {
                     message = Message(
                         title: "You're up to date",
@@ -64,8 +108,8 @@ final class AppUpdateViewModel: ObservableObject {
                 }
             }
         } catch {
-            availableUpdate = nil
             if showUpToDateMessage {
+                availableUpdate = nil
                 message = Message(
                     title: "Update check failed",
                     body: error.localizedDescription
@@ -103,5 +147,14 @@ final class AppUpdateViewModel: ObservableObject {
                 )
             }
         }
+    }
+
+    private var shouldAutomaticallyCheck: Bool {
+        let lastCheck = defaults.double(forKey: Self.lastCheckDefaultsKey)
+        guard lastCheck > 0 else {
+            return true
+        }
+        let elapsed = Date().timeIntervalSince1970 - lastCheck
+        return elapsed >= Self.automaticCheckInterval
     }
 }

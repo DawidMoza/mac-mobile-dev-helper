@@ -12,9 +12,6 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                if updateModel.availableUpdate != nil || updateModel.isUpdating {
-                    updateBanner
-                }
                 androidFilesystemFeature
                 cleanupFeature
                 portsFeature
@@ -23,13 +20,12 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 720)
         .task {
-            async let cleanup: Void = model.refresh()
-            async let updates: Void = updateModel.checkForUpdates()
-            _ = await (cleanup, updates)
+            updateModel.startAutomaticUpdateChecks()
+            await model.refresh()
         }
         .onReceive(NotificationCenter.default.publisher(for: .checkForAppUpdates)) { _ in
             Task {
-                await updateModel.checkForUpdates(showUpToDateMessage: true)
+                await updateModel.checkForUpdates(force: true, showUpToDateMessage: true)
             }
         }
         .sheet(isPresented: $isConfirmingCleanup) {
@@ -73,52 +69,43 @@ struct ContentView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top) {
+        HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Mac Mobile Dev Helper")
                     .font(.largeTitle.bold())
                 Text("Android device files, storage cleanup, and macOS development diagnostics.")
                     .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Text(updateModel.currentVersionText)
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .padding(.top, 8)
-        }
-    }
-
-    private var updateBanner: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: updateModel.isUpdating ? "arrow.triangle.2.circlepath" : "arrow.down.app")
-                .foregroundStyle(.blue)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(
-                    updateModel.isUpdating
-                        ? "Updating…"
-                        : "Update available"
-                )
-                .font(.headline)
-                if let statusText = updateModel.statusText {
+                if updateModel.isUpdating, let statusText = updateModel.statusText {
                     Text(statusText)
-                        .font(.callout)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
-            Spacer()
-            if updateModel.isUpdating || updateModel.isChecking {
-                ProgressView()
-                    .controlSize(.small)
-            }
-            if updateModel.availableUpdate != nil, !updateModel.isUpdating {
-                Button(updateModel.updateButtonTitle) {
-                    updateModel.requestUpdate()
+            Spacer(minLength: 12)
+            VStack(alignment: .trailing, spacing: 8) {
+                if updateModel.isUpdating {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Updating…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 6)
+                } else if updateModel.availableUpdate != nil {
+                    Button(updateModel.updateButtonTitle) {
+                        updateModel.requestUpdate()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 4)
+                } else {
+                    Text(updateModel.currentVersionText)
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 8)
                 }
-                .buttonStyle(.borderedProminent)
             }
         }
-        .padding(14)
-        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var androidFilesystemFeature: some View {
