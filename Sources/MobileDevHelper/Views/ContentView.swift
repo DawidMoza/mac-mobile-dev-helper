@@ -57,14 +57,11 @@ struct ContentView: View {
                 }
             )
         }
-        .alert("Install update and relaunch?", isPresented: $updateModel.isConfirmingUpdate) {
-            Button("Cancel", role: .cancel) {}
-            Button("Update", role: .destructive) {
-                updateModel.confirmUpdate()
-            }
-        } message: {
-            Text(
-                "Mac Mobile Dev Helper will clone \(updateModel.availableUpdate?.latestRelease.tag ?? "the latest tag") from GitHub, build it with Swift, replace this app, and relaunch. Xcode Command Line Tools are required."
+        .sheet(isPresented: $updateModel.isConfirmingUpdate) {
+            UpdateConfirmationView(
+                tag: updateModel.availableUpdate?.latestRelease.tag ?? "the latest tag",
+                onCancel: { updateModel.isConfirmingUpdate = false },
+                onConfirm: { updateModel.confirmUpdate() }
             )
         }
         .alert(item: $model.message) { message in
@@ -86,8 +83,13 @@ struct ContentView: View {
     private var header: some View {
         HStack(alignment: .top, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("Mac Mobile Dev Helper")
-                    .font(.largeTitle.bold())
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Mac Mobile Dev Helper")
+                        .font(.largeTitle.bold())
+                    Text("by Dawid Moza")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
                 Text("Android device files, storage cleanup, and macOS development diagnostics.")
                     .foregroundStyle(.secondary)
                 if updateModel.isUpdating, let statusText = updateModel.statusText {
@@ -129,6 +131,7 @@ struct ContentView: View {
                                 updateModel.requestUpdate()
                             }
                             .buttonStyle(.borderedProminent)
+                            .tint(.blue)
                         } else {
                             Text(updateModel.currentVersionText)
                                 .font(.callout.monospacedDigit())
@@ -314,6 +317,35 @@ struct ContentView: View {
             .buttonStyle(.borderedProminent)
             .disabled(!model.canClean)
         }
+    }
+}
+
+private struct UpdateConfirmationView: View {
+    let tag: String
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Install update and relaunch?")
+                .font(.title2.bold())
+
+            Text("Mac Mobile Dev Helper will clone \(tag) from GitHub, build it with Swift, replace this app, and relaunch. Xcode Command Line Tools are required.")
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Update", action: onConfirm)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.blue)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 520, height: 220)
     }
 }
 
