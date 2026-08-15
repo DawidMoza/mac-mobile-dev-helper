@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct CleanupPaths: Sendable {
@@ -28,6 +29,10 @@ struct CleanupPaths: Sendable {
         cursorGlobalStorage.appendingPathComponent("state.vscdb")
     }
 
+    var activeCursorDatabaseWAL: URL {
+        cursorGlobalStorage.appendingPathComponent("state.vscdb-wal")
+    }
+
     var xcodeDerivedData: URL {
         homeDirectory
             .appendingPathComponent("Library/Developer/Xcode/DerivedData", isDirectory: true)
@@ -54,9 +59,17 @@ actor CleanupService {
     ]
 
     private let paths: CleanupPaths
+    private let isCursorRunning: @Sendable () -> Bool
+    private let sqliteExecutable: URL
 
-    init(paths: CleanupPaths = .live) {
+    init(
+        paths: CleanupPaths = .live,
+        isCursorRunning: @escaping @Sendable () -> Bool = CleanupService.detectCursorRunning,
+        sqliteExecutable: URL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+    ) {
         self.paths = paths
+        self.isCursorRunning = isCursorRunning
+        self.sqliteExecutable = sqliteExecutable
     }
 
     func scan() -> CleanupSnapshot {
@@ -78,8 +91,44 @@ actor CleanupService {
 
         return CleanupSnapshot(
             categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup],
-            activeCursorDatabaseSize: existingAllocatedSize(at: paths.activeCursorDatabase)
+            cursorDatabase: scanCursorDatabase()
         )
+    }
+
+    func compactCursorDatabase() throws -> CursorCompactResult {
+        guard !isCursorRunning() else {
+            throw CursorCompactError.cursorIsRunning
+        }
+        guard FileManager.default.fileExists(atPath: paths.activeCursorDatabase.path) else {
+            throw CursorCompactError.databaseMissing
+        }
+        guard FileManager.default.isExecutableFile(atPath: sqliteExecutable.path) else {
+            throw CursorCompactError.sqliteMissing
+        }
+
+        let sizeBefore = existingAllocatedSize(at: paths.activeCursorDatabase) ?? 0
+        if let available = volumeAvailableCapacity(at: paths.activeCursorDatabase),
+           available <= sizeBefore {
+            throw CursorCompactError.notEnoughDiskSpace(needed: sizeBefore, available: available)
+        }
+
+        var sql = "PRAGMA journal_mode=DELETE;\n"
+        if try sqliteTableExists("cursorDiskKV") {
+            sql += """
+            BEGIN IMMEDIATE;
+            DELETE FROM cursorDiskKV WHERE key LIKE 'agentKv:%';
+            DELETE FROM cursorDiskKV WHERE key LIKE 'bubbleId:%';
+            DELETE FROM cursorDiskKV WHERE key LIKE 'checkpointId:%';
+            DELETE FROM cursorDiskKV WHERE key LIKE 'composerData:%';
+            COMMIT;
+
+            """
+        }
+        sql += "VACUUM;"
+        try runSQLite(sql)
+
+        let sizeAfter = existingAllocatedSize(at: paths.activeCursorDatabase) ?? 0
+        return CursorCompactResult(sizeBefore: sizeBefore, sizeAfter: sizeAfter)
     }
 
     func clean(items: [CleanupItem]) -> CleanupResult {
@@ -114,6 +163,91 @@ actor CleanupService {
             reclaimedSize: reclaimedSize,
             failures: failures
         )
+    }
+
+    static func detectCursorRunning() -> Bool {
+        NSWorkspace.shared.runningApplications.contains { application in
+            if application.bundleIdentifier == "com.todesktop.230313mzl4w4u92" {
+                return true
+            }
+            let name = (application.localizedName ?? "").lowercased()
+            return name == "cursor" || name.hasPrefix("cursor helper")
+        }
+    }
+
+    private func scanCursorDatabase() -> CursorDatabaseStatus? {
+        guard let allocatedSize = existingAllocatedSize(at: paths.activeCursorDatabase) else {
+            return nil
+        }
+        return CursorDatabaseStatus(
+            path: paths.activeCursorDatabase.path,
+            allocatedSize: allocatedSize,
+            walSize: existingAllocatedSize(at: paths.activeCursorDatabaseWAL) ?? 0,
+            isCursorRunning: isCursorRunning(),
+            availableDiskSpace: volumeAvailableCapacity(at: paths.activeCursorDatabase)
+        )
+    }
+
+    private func volumeAvailableCapacity(at url: URL) -> Int64? {
+        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let capacity = values?.volumeAvailableCapacityForImportantUsage {
+            return capacity
+        }
+        let fallback = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+        if let capacity = fallback?.volumeAvailableCapacity {
+            return Int64(capacity)
+        }
+        return nil
+    }
+
+    private func runSQLite(_ sql: String) throws {
+        let output = try runSQLite(sql, captureOutput: false)
+        if !output.error.isEmpty {
+            throw CursorCompactError.commandFailed(output.error)
+        }
+    }
+
+    private func sqliteTableExists(_ tableName: String) throws -> Bool {
+        let escaped = tableName.replacingOccurrences(of: "'", with: "''")
+        let output = try runSQLite(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='\(escaped)';",
+            captureOutput: true
+        )
+        if !output.error.isEmpty {
+            throw CursorCompactError.commandFailed(output.error)
+        }
+        return output.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+    }
+
+    private func runSQLite(
+        _ sql: String,
+        captureOutput: Bool
+    ) throws -> (standardOutput: String, error: String) {
+        let process = Process()
+        process.executableURL = sqliteExecutable
+        process.arguments = [paths.activeCursorDatabase.path]
+        let stdin = Pipe()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        try process.run()
+        stdin.fileHandleForWriting.write(Data(sql.utf8))
+        try stdin.fileHandleForWriting.close()
+        process.waitUntilExit()
+
+        let standardOutput = captureOutput
+            ? String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            : ""
+        let error = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if process.terminationStatus != 0 {
+            throw CursorCompactError.commandFailed(error)
+        }
+        return (standardOutput, error)
     }
 
     private func scanChildren(

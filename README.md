@@ -48,8 +48,11 @@ ADB is discovered from `PATH`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the defaul
 - Xcode DerivedData compilation products, module/compilation caches, and documentation indexes
 - Recognized Android, iOS, and Godot artifacts directly under `/private/tmp`
 - Cursor's inactive `state.vscdb.backup` file
+- Compact the active Cursor `state.vscdb` after quitting Cursor: prune cached agent/chat blobs, then `VACUUM`
 
-The active Cursor database, source repositories, simulators, Gradle caches, and Android SDK are never deleted. All cleanup categories are deselected by default. Clearing Xcode caches makes the next build or documentation lookup slower.
+The active Cursor database file itself, source repositories, simulators, Gradle caches, and Android SDK are never deleted. All cleanup categories are deselected by default. Clearing Xcode caches makes the next build or documentation lookup slower.
+
+Compacting `state.vscdb` keeps settings and the file in place. In-app chat history may show “Loading Chat…” afterward; transcripts remain under `~/.cursor/projects`. VACUUM needs about as much free disk as the current database and can take a long time on multi-gigabyte files.
 
 Every cleanup requires confirmation and displays the exact paths that will be permanently removed.
 

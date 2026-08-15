@@ -16,6 +16,7 @@ final class CleanupViewModel: ObservableObject {
         CleanupCategoryID.allCases.filter(\.isSelectedByDefault)
     )
     @Published private(set) var isWorking = false
+    @Published private(set) var workingStatus = "Scanning or cleaning…"
     @Published private(set) var isXcodeRunning = false
     @Published var message: Message?
 
@@ -39,8 +40,16 @@ final class CleanupViewModel: ObservableObject {
         !selectedItems.isEmpty && !isWorking
     }
 
+    var canCompactCursorDatabase: Bool {
+        guard let database = snapshot.cursorDatabase else {
+            return false
+        }
+        return !isWorking && !database.isCursorRunning && database.hasEnoughDiskSpaceToCompact
+    }
+
     func refresh() async {
         isWorking = true
+        workingStatus = "Scanning…"
         snapshot = await service.scan()
         isXcodeRunning = !NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.apple.dt.Xcode")
@@ -63,6 +72,7 @@ final class CleanupViewModel: ObservableObject {
         }
 
         isWorking = true
+        workingStatus = "Cleaning selected files…"
         let result = await service.clean(items: items)
         snapshot = await service.scan()
         isWorking = false
@@ -78,6 +88,27 @@ final class CleanupViewModel: ObservableObject {
             title: result.failures.isEmpty ? "Cleanup complete" : "Cleanup finished with errors",
             body: details
         )
+    }
+
+    func compactCursorDatabase() async {
+        isWorking = true
+        workingStatus = "Compacting the Cursor database… this can take a long time"
+        do {
+            let result = try await service.compactCursorDatabase()
+            snapshot = await service.scan()
+            isWorking = false
+            message = Message(
+                title: "Cursor database compacted",
+                body: "Reclaimed approximately \(Self.format(result.reclaimedSize)). Size went from \(Self.format(result.sizeBefore)) to \(Self.format(result.sizeAfter)). In-app chats may need to be reopened from transcripts."
+            )
+        } catch {
+            snapshot = await service.scan()
+            isWorking = false
+            message = Message(
+                title: "Could not compact Cursor database",
+                body: error.localizedDescription
+            )
+        }
     }
 
     static func format(_ byteCount: Int64) -> String {

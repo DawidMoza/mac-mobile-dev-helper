@@ -165,6 +165,60 @@ final class CleanupServiceTests: XCTestCase {
         XCTAssertTrue(snapshot.categories.allSatisfy(\.items.isEmpty))
         XCTAssertNil(snapshot.activeCursorDatabaseSize)
     }
+
+    func testCompactCursorDatabaseRemovesAgentKeysAndKeepsSettings() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+
+        try environment.createCursorDatabase()
+        let service = CleanupService(paths: environment.paths, isCursorRunning: { false })
+
+        let result = try await service.compactCursorDatabase()
+
+        XCTAssertGreaterThanOrEqual(result.sizeBefore, result.sizeAfter)
+        XCTAssertEqual(
+            try environment.sqliteQuery("SELECT key FROM cursorDiskKV ORDER BY key;"),
+            ["otherSetting"]
+        )
+        XCTAssertEqual(
+            try environment.sqliteQuery("SELECT key FROM ItemTable ORDER BY key;"),
+            ["storage.serviceMachineId"]
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: environment.paths.activeCursorDatabase.path))
+    }
+
+    func testCompactCursorDatabaseRejectsWhenCursorIsRunning() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+
+        try environment.createCursorDatabase()
+        let service = CleanupService(paths: environment.paths, isCursorRunning: { true })
+
+        do {
+            _ = try await service.compactCursorDatabase()
+            XCTFail("Expected cursorIsRunning")
+        } catch let error as CursorCompactError {
+            XCTAssertEqual(error, .cursorIsRunning)
+        }
+        XCTAssertEqual(
+            try environment.sqliteQuery("SELECT COUNT(*) FROM cursorDiskKV;"),
+            ["5"]
+        )
+    }
+
+    func testCompactCursorDatabaseRejectsMissingDatabase() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+
+        let service = CleanupService(paths: environment.paths, isCursorRunning: { false })
+
+        do {
+            _ = try await service.compactCursorDatabase()
+            XCTFail("Expected databaseMissing")
+        } catch let error as CursorCompactError {
+            XCTAssertEqual(error, .databaseMissing)
+        }
+    }
 }
 
 private extension CleanupSnapshot {
@@ -213,7 +267,60 @@ private final class TestEnvironment {
         try Data(repeating: 0xA5, count: size).write(to: url)
     }
 
+    func createCursorDatabase() throws {
+        try FileManager.default.createDirectory(
+            at: paths.cursorGlobalStorage,
+            withIntermediateDirectories: true
+        )
+        try runSQLite(
+            """
+            CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);
+            CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB);
+            INSERT INTO ItemTable VALUES ('storage.serviceMachineId', 'keep-me');
+            INSERT INTO cursorDiskKV VALUES ('agentKv:abc', 'xxxxxxxxxxxxxxxx');
+            INSERT INTO cursorDiskKV VALUES ('bubbleId:1', 'yyyyyyyyyyyyyyyy');
+            INSERT INTO cursorDiskKV VALUES ('checkpointId:1', 'zzzzzzzzzzzzzzzz');
+            INSERT INTO cursorDiskKV VALUES ('composerData:1', 'wwwwwwwwwwwwwwww');
+            INSERT INTO cursorDiskKV VALUES ('otherSetting', 'keep-this-too');
+            """
+        )
+    }
+
+    func sqliteQuery(_ sql: String) throws -> [String] {
+        try runSQLite(sql)
+            .split(whereSeparator: \.isNewline)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+
     func remove() {
         try? FileManager.default.removeItem(at: root)
+    }
+
+    @discardableResult
+    private func runSQLite(_ sql: String) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [paths.activeCursorDatabase.path]
+        let stdin = Pipe()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardInput = stdin
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        stdin.fileHandleForWriting.write(Data(sql.utf8))
+        try stdin.fileHandleForWriting.close()
+        process.waitUntilExit()
+        let error = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard process.terminationStatus == 0 else {
+            throw NSError(
+                domain: "CleanupServiceTests",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: error]
+            )
+        }
+        return String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
     }
 }

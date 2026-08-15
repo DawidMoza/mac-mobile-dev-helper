@@ -30,7 +30,7 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
         case .mobileBuildTemporaryFiles:
             "Recognized Android, iOS, and Godot build artifacts directly under /private/tmp."
         case .cursorBackup:
-            "Cursor's fallback database copy. The active database and chat history are never selected."
+            "Cursor's fallback database copy. The active database is compacted separately and never selected here."
         }
     }
 
@@ -58,15 +58,70 @@ struct CleanupCategory: Identifiable, Sendable {
     }
 }
 
+struct CursorDatabaseStatus: Sendable {
+    let path: String
+    let allocatedSize: Int64
+    let walSize: Int64
+    let isCursorRunning: Bool
+    let availableDiskSpace: Int64?
+
+    var needsCompaction: Bool {
+        allocatedSize >= 1_073_741_824
+    }
+
+    var hasEnoughDiskSpaceToCompact: Bool {
+        guard let availableDiskSpace else {
+            return true
+        }
+        return availableDiskSpace > allocatedSize
+    }
+}
+
+struct CursorCompactResult: Sendable {
+    let sizeBefore: Int64
+    let sizeAfter: Int64
+
+    var reclaimedSize: Int64 {
+        max(0, sizeBefore - sizeAfter)
+    }
+}
+
+enum CursorCompactError: LocalizedError, Equatable {
+    case cursorIsRunning
+    case databaseMissing
+    case sqliteMissing
+    case notEnoughDiskSpace(needed: Int64, available: Int64)
+    case commandFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .cursorIsRunning:
+            "Quit Cursor completely before compacting the database."
+        case .databaseMissing:
+            "The active Cursor database was not found."
+        case .sqliteMissing:
+            "sqlite3 is required to compact the Cursor database."
+        case .notEnoughDiskSpace(let needed, let available):
+            "Compacting needs about \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)) free. This volume has \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file))."
+        case .commandFailed(let message):
+            message.isEmpty ? "Compacting the Cursor database failed." : message
+        }
+    }
+}
+
 struct CleanupSnapshot: Sendable {
     let categories: [CleanupCategory]
-    let activeCursorDatabaseSize: Int64?
+    let cursorDatabase: CursorDatabaseStatus?
+
+    var activeCursorDatabaseSize: Int64? {
+        cursorDatabase?.allocatedSize
+    }
 
     static let empty = CleanupSnapshot(
         categories: CleanupCategoryID.allCases.map {
             CleanupCategory(id: $0, items: [], scanErrors: [])
         },
-        activeCursorDatabaseSize: nil
+        cursorDatabase: nil
     )
 }
 

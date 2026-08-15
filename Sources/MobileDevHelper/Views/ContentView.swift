@@ -4,6 +4,7 @@ struct ContentView: View {
     @StateObject private var model = CleanupViewModel()
     @StateObject private var updateModel = AppUpdateViewModel()
     @State private var isConfirmingCleanup = false
+    @State private var isConfirmingCursorCompact = false
     @State private var isAndroidFilesystemExpanded = true
     @State private var isCleanupExpanded = true
     @State private var isPortsExpanded = true
@@ -26,6 +27,20 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .checkForAppUpdates)) { _ in
             Task {
                 await updateModel.checkForUpdates(force: true, showUpToDateMessage: true)
+            }
+        }
+        .sheet(isPresented: $isConfirmingCursorCompact) {
+            if let database = model.snapshot.cursorDatabase {
+                CursorCompactConfirmationView(
+                    database: database,
+                    onCancel: { isConfirmingCursorCompact = false },
+                    onConfirm: {
+                        isConfirmingCursorCompact = false
+                        Task {
+                            await model.compactCursorDatabase()
+                        }
+                    }
+                )
             }
         }
         .sheet(isPresented: $isConfirmingCleanup) {
@@ -236,20 +251,39 @@ struct ContentView: View {
 
     @ViewBuilder
     private var cursorDatabaseNotice: some View {
-        if let size = model.snapshot.activeCursorDatabaseSize {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "info.circle")
-                    .foregroundStyle(.blue)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Active Cursor database: \(CleanupViewModel.format(size))")
-                        .font(.headline)
-                    Text("This app never deletes state.vscdb. In Cursor, use “Developer: GC Agent KV Blobs” to safely compact agent data.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+        if let database = model.snapshot.cursorDatabase {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: database.needsCompaction ? "exclamationmark.triangle.fill" : "internaldrive")
+                        .foregroundStyle(database.needsCompaction ? .orange : .blue)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Active Cursor database: \(CleanupViewModel.format(database.allocatedSize))")
+                            .font(.headline)
+                        Text("Cached agent and chat blobs in state.vscdb. This never deletes the file; it prunes those keys and vacuums so macOS can reclaim the space.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        if database.isCursorRunning {
+                            Text("Quit Cursor completely before compacting.")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                        } else if !database.hasEnoughDiskSpaceToCompact, let available = database.availableDiskSpace {
+                            Text("Needs about \(CleanupViewModel.format(database.allocatedSize)) free. This volume has \(CleanupViewModel.format(available)).")
+                                .font(.callout)
+                                .foregroundStyle(.orange)
+                        }
+                    }
+                    Spacer()
+                    Button("Compact…") {
+                        isConfirmingCursorCompact = true
+                    }
+                    .disabled(!model.canCompactCursorDatabase)
                 }
             }
             .padding(14)
-            .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+            .background(
+                (database.needsCompaction ? Color.orange : Color.blue).opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
         }
     }
 
@@ -258,7 +292,7 @@ struct ContentView: View {
             if model.isWorking {
                 ProgressView()
                     .controlSize(.small)
-                Text("Scanning or cleaning…")
+                Text(model.workingStatus)
                     .foregroundStyle(.secondary)
             } else {
                 Text("\(CleanupViewModel.format(model.selectedSize)) selected")
@@ -333,5 +367,69 @@ private struct CleanupConfirmationView: View {
         }
         .padding(24)
         .frame(width: 640, height: 420)
+    }
+}
+
+private struct CursorCompactConfirmationView: View {
+    let database: CursorDatabaseStatus
+    let onCancel: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Compact the active Cursor database?")
+                .font(.title2.bold())
+
+            Text("This does not delete state.vscdb. It removes cached agent and chat blobs, then vacuums the file so the disk space can be reclaimed.")
+
+            VStack(alignment: .leading, spacing: 8) {
+                labeledValue("Current size", CleanupViewModel.format(database.allocatedSize))
+                if let available = database.availableDiskSpace {
+                    labeledValue("Free space", CleanupViewModel.format(available))
+                }
+                labeledValue("Database", database.path)
+            }
+            .font(.callout)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Quit Cursor completely first, including helpers.")
+                Text("Settings stay. In-app chats may show “Loading Chat…”. Transcripts remain in ~/.cursor/projects.")
+                Text("VACUUM needs about as much free disk as the current file. A 50+ GB database can take 30–60 minutes.")
+            }
+            .font(.callout)
+            .foregroundStyle(.secondary)
+
+            if database.isCursorRunning {
+                Label(
+                    "Cursor is still running. Quit it before continuing.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .foregroundStyle(.orange)
+            }
+
+            Spacer()
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Compact Database", role: .destructive, action: onConfirm)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(database.isCursorRunning || !database.hasEnoughDiskSpaceToCompact)
+            }
+        }
+        .padding(24)
+        .frame(width: 640, height: 420)
+    }
+
+    private func labeledValue(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .font(.body.monospacedDigit())
+                .textSelection(.enabled)
+        }
     }
 }
