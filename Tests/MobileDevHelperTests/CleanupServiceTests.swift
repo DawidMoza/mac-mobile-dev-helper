@@ -184,7 +184,12 @@ final class CleanupServiceTests: XCTestCase {
             try environment.sqliteQuery("SELECT key FROM ItemTable ORDER BY key;"),
             ["storage.serviceMachineId"]
         )
+        XCTAssertEqual(
+            try environment.sqliteQuery("SELECT name FROM composerHeaders ORDER BY name;"),
+            ["kept-header"]
+        )
         XCTAssertTrue(FileManager.default.fileExists(atPath: environment.paths.activeCursorDatabase.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: environment.paths.compactingCursorDatabase.path))
     }
 
     func testCompactCursorDatabaseRejectsWhenCursorIsRunning() async throws {
@@ -204,6 +209,26 @@ final class CleanupServiceTests: XCTestCase {
             try environment.sqliteQuery("SELECT COUNT(*) FROM cursorDiskKV;"),
             ["5"]
         )
+    }
+
+    func testCompactAllowsWhenFreeSpaceIsSmallerThanTheDatabase() {
+        let tightDisk = CursorDatabaseStatus(
+            path: "/tmp/state.vscdb",
+            allocatedSize: 58_000_000_000,
+            walSize: 0,
+            isCursorRunning: false,
+            availableDiskSpace: 10_000_000_000
+        )
+        let almostFull = CursorDatabaseStatus(
+            path: "/tmp/state.vscdb",
+            allocatedSize: 58_000_000_000,
+            walSize: 0,
+            isCursorRunning: false,
+            availableDiskSpace: 32 * 1_024 * 1_024
+        )
+
+        XCTAssertTrue(tightDisk.hasEnoughDiskSpaceToCompact)
+        XCTAssertFalse(almostFull.hasEnoughDiskSpaceToCompact)
     }
 
     func testCompactCursorDatabaseRejectsMissingDatabase() async throws {
@@ -275,8 +300,10 @@ private final class TestEnvironment {
         try runSQLite(
             """
             CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);
+            CREATE TABLE composerHeaders (name TEXT PRIMARY KEY, value BLOB);
             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB);
             INSERT INTO ItemTable VALUES ('storage.serviceMachineId', 'keep-me');
+            INSERT INTO composerHeaders VALUES ('kept-header', 'header-value');
             INSERT INTO cursorDiskKV VALUES ('agentKv:abc', 'xxxxxxxxxxxxxxxx');
             INSERT INTO cursorDiskKV VALUES ('bubbleId:1', 'yyyyyyyyyyyyyyyy');
             INSERT INTO cursorDiskKV VALUES ('checkpointId:1', 'zzzzzzzzzzzzzzzz');

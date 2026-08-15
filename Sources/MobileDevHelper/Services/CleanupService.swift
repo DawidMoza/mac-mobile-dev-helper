@@ -33,6 +33,14 @@ struct CleanupPaths: Sendable {
         cursorGlobalStorage.appendingPathComponent("state.vscdb-wal")
     }
 
+    var activeCursorDatabaseSHM: URL {
+        cursorGlobalStorage.appendingPathComponent("state.vscdb-shm")
+    }
+
+    var compactingCursorDatabase: URL {
+        cursorGlobalStorage.appendingPathComponent("state.vscdb.compacting")
+    }
+
     var xcodeDerivedData: URL {
         homeDirectory
             .appendingPathComponent("Library/Developer/Xcode/DerivedData", isDirectory: true)
@@ -108,24 +116,22 @@ actor CleanupService {
 
         let sizeBefore = existingAllocatedSize(at: paths.activeCursorDatabase) ?? 0
         if let available = volumeAvailableCapacity(at: paths.activeCursorDatabase),
-           available <= sizeBefore {
-            throw CursorCompactError.notEnoughDiskSpace(needed: sizeBefore, available: available)
+           available < CursorDatabaseStatus.minimumFreeSpaceToCompact {
+            throw CursorCompactError.notEnoughDiskSpace(
+                needed: CursorDatabaseStatus.minimumFreeSpaceToCompact,
+                available: available
+            )
         }
 
-        var sql = "PRAGMA journal_mode=DELETE;\n"
-        if try sqliteTableExists("cursorDiskKV") {
-            sql += """
-            BEGIN IMMEDIATE;
-            DELETE FROM cursorDiskKV WHERE key LIKE 'agentKv:%';
-            DELETE FROM cursorDiskKV WHERE key LIKE 'bubbleId:%';
-            DELETE FROM cursorDiskKV WHERE key LIKE 'checkpointId:%';
-            DELETE FROM cursorDiskKV WHERE key LIKE 'composerData:%';
-            COMMIT;
-
-            """
+        let compactingURL = paths.compactingCursorDatabase
+        try? FileManager.default.removeItem(at: compactingURL)
+        do {
+            try rebuildCompactedDatabase(to: compactingURL)
+            try replaceActiveDatabase(with: compactingURL)
+        } catch {
+            try? FileManager.default.removeItem(at: compactingURL)
+            throw error
         }
-        sql += "VACUUM;"
-        try runSQLite(sql)
 
         let sizeAfter = existingAllocatedSize(at: paths.activeCursorDatabase) ?? 0
         return CursorCompactResult(sizeBefore: sizeBefore, sizeAfter: sizeAfter)
@@ -200,32 +206,126 @@ actor CleanupService {
         return nil
     }
 
-    private func runSQLite(_ sql: String) throws {
-        let output = try runSQLite(sql, captureOutput: false)
-        if !output.error.isEmpty {
-            throw CursorCompactError.commandFailed(output.error)
+    private func rebuildCompactedDatabase(to destination: URL) throws {
+        let tables = try sqliteMasterObjects(from: paths.activeCursorDatabase, type: "table")
+        let indexes = try sqliteMasterObjects(from: paths.activeCursorDatabase, type: "index")
+        let views = try sqliteMasterObjects(from: paths.activeCursorDatabase, type: "view")
+        let triggers = try sqliteMasterObjects(from: paths.activeCursorDatabase, type: "trigger")
+
+        var statements = [
+            "PRAGMA journal_mode=OFF;",
+            "PRAGMA synchronous=OFF;",
+            "ATTACH DATABASE \(quoteSQLString(paths.activeCursorDatabase.path)) AS src;"
+        ]
+
+        for table in tables {
+            statements.append(statement(from: table.sql))
+            let quoted = quoteSQLIdentifier(table.name)
+            if table.name == "cursorDiskKV" {
+                statements.append(
+                    """
+                    INSERT INTO \(quoted) SELECT * FROM src.\(quoted)
+                    WHERE key NOT LIKE 'agentKv:%'
+                      AND key NOT LIKE 'bubbleId:%'
+                      AND key NOT LIKE 'checkpointId:%'
+                      AND key NOT LIKE 'composerData:%';
+                    """
+                )
+            } else {
+                statements.append("INSERT INTO \(quoted) SELECT * FROM src.\(quoted);")
+            }
+        }
+
+        for object in indexes + views + triggers {
+            statements.append(statement(from: object.sql))
+        }
+
+        statements.append("DETACH DATABASE src;")
+
+        _ = try runSQLite(on: destination, statements.joined(separator: "\n"), captureOutput: false)
+        let integrity = try runSQLite(on: destination, "PRAGMA integrity_check;", captureOutput: true)
+            .standardOutput
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard integrity == "ok" else {
+            throw CursorCompactError.commandFailed(
+                integrity.isEmpty ? "The compacted database failed its integrity check." : integrity
+            )
         }
     }
 
-    private func sqliteTableExists(_ tableName: String) throws -> Bool {
-        let escaped = tableName.replacingOccurrences(of: "'", with: "''")
-        let output = try runSQLite(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='\(escaped)';",
-            captureOutput: true
-        )
-        if !output.error.isEmpty {
-            throw CursorCompactError.commandFailed(output.error)
+    private func replaceActiveDatabase(with compacted: URL) throws {
+        let fileManager = FileManager.default
+        for sidecar in [paths.activeCursorDatabaseWAL, paths.activeCursorDatabaseSHM] {
+            if fileManager.fileExists(atPath: sidecar.path) {
+                try fileManager.removeItem(at: sidecar)
+            }
         }
-        return output.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        _ = try fileManager.replaceItemAt(paths.activeCursorDatabase, withItemAt: compacted)
+    }
+
+    private func sqliteMasterObjects(
+        from database: URL,
+        type: String
+    ) throws -> [(name: String, sql: String)] {
+        let output = try runSQLite(
+            on: database,
+            """
+            SELECT name, sql FROM sqlite_master
+            WHERE type='\(type.replacingOccurrences(of: "'", with: "''"))'
+              AND name NOT LIKE 'sqlite_%'
+              AND sql IS NOT NULL
+            ORDER BY name;
+            """,
+            captureOutput: true,
+            recordSeparator: "\u{1e}",
+            columnSeparator: "\u{1f}"
+        )
+        return output.standardOutput
+            .split(separator: "\u{1e}", omittingEmptySubsequences: true)
+            .compactMap { record in
+                let columns = record.split(separator: "\u{1f}", maxSplits: 1, omittingEmptySubsequences: false)
+                guard columns.count == 2 else {
+                    return nil
+                }
+                let name = String(columns[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+                let sql = String(columns[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty, !sql.isEmpty else {
+                    return nil
+                }
+                return (name, sql)
+            }
+    }
+
+    private func statement(from sql: String) -> String {
+        sql.hasSuffix(";") ? sql : sql + ";"
+    }
+
+    private func quoteSQLIdentifier(_ name: String) -> String {
+        "\"\(name.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+
+    private func quoteSQLString(_ value: String) -> String {
+        "'\(value.replacingOccurrences(of: "'", with: "''"))'"
     }
 
     private func runSQLite(
+        on database: URL,
         _ sql: String,
-        captureOutput: Bool
+        captureOutput: Bool,
+        recordSeparator: String? = nil,
+        columnSeparator: String? = nil
     ) throws -> (standardOutput: String, error: String) {
         let process = Process()
         process.executableURL = sqliteExecutable
-        process.arguments = [paths.activeCursorDatabase.path]
+        var arguments = ["-noheader"]
+        if let recordSeparator {
+            arguments += ["-newline", recordSeparator]
+        }
+        if let columnSeparator {
+            arguments += ["-separator", columnSeparator]
+        }
+        arguments.append(database.path)
+        process.arguments = arguments
         let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
@@ -238,16 +338,17 @@ actor CleanupService {
         try stdin.fileHandleForWriting.close()
         process.waitUntilExit()
 
-        let standardOutput = captureOutput
-            ? String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            : ""
+        let standardOutput = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let error = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if process.terminationStatus != 0 {
             throw CursorCompactError.commandFailed(error)
         }
-        return (standardOutput, error)
+        if !error.isEmpty {
+            throw CursorCompactError.commandFailed(error)
+        }
+        return (captureOutput ? standardOutput : "", error)
     }
 
     private func scanChildren(

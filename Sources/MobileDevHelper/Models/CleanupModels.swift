@@ -69,11 +69,13 @@ struct CursorDatabaseStatus: Sendable {
         allocatedSize >= 1_073_741_824
     }
 
+    static let minimumFreeSpaceToCompact: Int64 = 64 * 1_024 * 1_024
+
     var hasEnoughDiskSpaceToCompact: Bool {
         guard let availableDiskSpace else {
             return true
         }
-        return availableDiskSpace > allocatedSize
+        return availableDiskSpace >= Self.minimumFreeSpaceToCompact
     }
 }
 
@@ -102,7 +104,7 @@ enum CursorCompactError: LocalizedError, Equatable {
         case .sqliteMissing:
             "sqlite3 is required to compact the Cursor database."
         case .notEnoughDiskSpace(let needed, let available):
-            "Compacting needs about \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)) free. This volume has \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file))."
+            "Compacting writes a small new copy and needs about \(ByteCountFormatter.string(fromByteCount: needed, countStyle: .file)) free. This volume has \(ByteCountFormatter.string(fromByteCount: available, countStyle: .file))."
         case .commandFailed(let message):
             message.isEmpty ? "Compacting the Cursor database failed." : message
         }

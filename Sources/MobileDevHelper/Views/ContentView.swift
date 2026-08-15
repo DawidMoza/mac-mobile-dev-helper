@@ -262,7 +262,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Active Cursor database: \(CleanupViewModel.format(database.allocatedSize))")
                             .font(.headline)
-                        Text("Cached agent and chat blobs in state.vscdb. This never deletes the file; it prunes those keys and vacuums so macOS can reclaim the space.")
+                        Text("Cached agent and chat blobs in state.vscdb. This writes a smaller new file, then replaces the original so the disk space can be reclaimed.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         if database.isCursorRunning {
@@ -270,7 +270,7 @@ struct ContentView: View {
                                 .font(.callout)
                                 .foregroundStyle(.orange)
                         } else if !database.hasEnoughDiskSpaceToCompact, let available = database.availableDiskSpace {
-                            Text("Needs about \(CleanupViewModel.format(database.allocatedSize)) free. This volume has \(CleanupViewModel.format(available)).")
+                            Text("Needs about \(CleanupViewModel.format(CursorDatabaseStatus.minimumFreeSpaceToCompact)) free for the new copy. This volume has \(CleanupViewModel.format(available)).")
                                 .font(.callout)
                                 .foregroundStyle(.orange)
                         }
@@ -412,7 +412,7 @@ private struct CursorCompactConfirmationView: View {
             Text("Compact the active Cursor database?")
                 .font(.title2.bold())
 
-            Text("This does not delete state.vscdb. It removes cached agent and chat blobs, then vacuums the file so the disk space can be reclaimed.")
+            Text("This does not delete settings. It copies everything except cached agent and chat blobs into a new smaller file, then replaces state.vscdb.")
 
             VStack(alignment: .leading, spacing: 8) {
                 labeledValue("Current size", CleanupViewModel.format(database.allocatedSize))
@@ -426,7 +426,7 @@ private struct CursorCompactConfirmationView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Quit Cursor completely first, including helpers.")
                 Text("Settings stay. In-app chats may show “Loading Chat…”. Transcripts remain in ~/.cursor/projects.")
-                Text("VACUUM needs about as much free disk as the current file. A 50+ GB database can take 30–60 minutes.")
+                Text("Only a little free space is required for the new copy. Scanning a 50+ GB database can still take a long time.")
             }
             .font(.callout)
             .foregroundStyle(.secondary)
