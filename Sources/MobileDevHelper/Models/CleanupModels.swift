@@ -111,9 +111,23 @@ enum CursorCompactError: LocalizedError, Equatable {
     }
 }
 
+struct DiskUsage: Sendable {
+    let totalCapacity: Int64
+    let availableCapacity: Int64
+
+    var usedCapacity: Int64 {
+        totalCapacity - availableCapacity
+    }
+
+    var usedFraction: Double {
+        Double(usedCapacity) / Double(totalCapacity)
+    }
+}
+
 struct CleanupSnapshot: Sendable {
     let categories: [CleanupCategory]
     let cursorDatabase: CursorDatabaseStatus?
+    let diskUsage: DiskUsage?
 
     var activeCursorDatabaseSize: Int64? {
         cursorDatabase?.allocatedSize
@@ -123,7 +137,8 @@ struct CleanupSnapshot: Sendable {
         categories: CleanupCategoryID.allCases.map {
             CleanupCategory(id: $0, items: [], scanErrors: [])
         },
-        cursorDatabase: nil
+        cursorDatabase: nil,
+        diskUsage: nil
     )
 }
 

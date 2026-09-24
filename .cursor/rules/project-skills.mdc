@@ -1,0 +1,8 @@
+---
+description: Keep all skills created for this project inside the repository.
+alwaysApply: true
+---
+
+- Create and update skills only in this repository's `.cursor/skills/` directory.
+- Never install or create skills in the user's personal folders, including `~/.codex/skills`, `~/.agents/skills`, or `~/.cursor/skills`.
+- When asked to bump the version, use `.cursor/skills/bump-version/SKILL.md`.

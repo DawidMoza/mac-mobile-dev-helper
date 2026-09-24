@@ -44,6 +44,7 @@ ADB is discovered from `PATH`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the defaul
 
 ### Storage cleanup
 
+- Overall disk usage with used space, free space, and total capacity; updates on refresh and after cleanup
 - Xcode/CoreDevice incremental app-installation deltas
 - Xcode DerivedData compilation products, module/compilation caches, and documentation indexes
 - Recognized Android, iOS, and Godot artifacts directly under `/private/tmp`

@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Mac Mobile Dev Helper"
 EXECUTABLE_NAME="MobileDevHelper"
 APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-0.1.11}"
 VERSION="${VERSION#v}"
 BUNDLE_VERSION="${BUNDLE_VERSION:-1}"
 

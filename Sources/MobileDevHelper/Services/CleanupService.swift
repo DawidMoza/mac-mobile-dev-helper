@@ -99,7 +99,8 @@ actor CleanupService {
 
         return CleanupSnapshot(
             categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup],
-            cursorDatabase: scanCursorDatabase()
+            cursorDatabase: scanCursorDatabase(),
+            diskUsage: scanDiskUsage()
         )
     }
 
@@ -179,6 +180,21 @@ actor CleanupService {
             let name = (application.localizedName ?? "").lowercased()
             return name == "cursor" || name.hasPrefix("cursor helper")
         }
+    }
+
+    private func scanDiskUsage() -> DiskUsage? {
+        guard let values = try? paths.homeDirectory.resourceValues(
+            forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]
+        ),
+        let total = values.volumeTotalCapacity, total > 0,
+        let available = values.volumeAvailableCapacity else {
+            return nil
+        }
+
+        return DiskUsage(
+            totalCapacity: Int64(total),
+            availableCapacity: Int64(min(total, max(0, available)))
+        )
     }
 
     private func scanCursorDatabase() -> CursorDatabaseStatus? {

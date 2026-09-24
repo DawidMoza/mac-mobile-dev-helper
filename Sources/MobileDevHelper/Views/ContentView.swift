@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ContentView: View {
@@ -8,6 +9,22 @@ struct ContentView: View {
     @State private var isAndroidFilesystemExpanded = true
     @State private var isCleanupExpanded = true
     @State private var isPortsExpanded = true
+
+    private static let headerIcon: NSImage = {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let image = NSImage(contentsOf: url) {
+            return image
+        }
+
+        // Swift Package runs do not have the installed app's resource bundle.
+        let sourceIcon = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Resources/AppIcon.png")
+        return NSImage(contentsOf: sourceIcon) ?? NSApplication.shared.applicationIconImage
+    }()
 
     var body: some View {
         ScrollView {
@@ -82,6 +99,13 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(alignment: .top, spacing: 16) {
+            Image(nsImage: Self.headerIcon)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 52, height: 52)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .accessibilityHidden(true)
+
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("Mac Mobile Dev Helper")
@@ -163,6 +187,7 @@ struct ContentView: View {
     private var cleanupFeature: some View {
         DisclosureGroup(isExpanded: $isCleanupExpanded) {
             VStack(alignment: .leading, spacing: 14) {
+                diskUsageIndicator
                 cleanupCategories
                 cursorDatabaseNotice
                 actionBar
@@ -194,6 +219,42 @@ struct ContentView: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(.quaternary)
         }
+    }
+
+    private var diskUsageIndicator: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Disk Usage", systemImage: "internaldrive")
+                    .font(.headline)
+                Spacer()
+                if let usage = model.snapshot.diskUsage {
+                    Text("\(CleanupViewModel.format(usage.availableCapacity)) free")
+                        .font(.headline.monospacedDigit())
+                }
+            }
+
+            if let usage = model.snapshot.diskUsage {
+                ProgressView(value: usage.usedFraction)
+                    .tint(usage.usedFraction >= 0.9 ? .orange : .blue)
+                    .accessibilityLabel("Disk usage")
+                    .accessibilityValue("\(CleanupViewModel.format(usage.usedCapacity)) used, \(CleanupViewModel.format(usage.availableCapacity)) free, \(CleanupViewModel.format(usage.totalCapacity)) total")
+
+                HStack {
+                    Text("\(CleanupViewModel.format(usage.usedCapacity)) used")
+                    Spacer()
+                    Text("\(CleanupViewModel.format(usage.totalCapacity)) total")
+                }
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+            } else {
+                Text(model.isWorking ? "Reading disk capacity…" : "Disk capacity unavailable. Try refreshing.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+        .help("Storage on the volume containing your home folder. Free space excludes purgeable files.")
     }
 
     private var cleanupCategories: some View {
