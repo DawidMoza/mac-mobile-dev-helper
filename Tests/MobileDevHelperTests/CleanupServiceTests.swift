@@ -3,6 +3,64 @@ import XCTest
 @testable import MobileDevHelper
 
 final class CleanupServiceTests: XCTestCase {
+    @MainActor
+    func testCleanupPublishesDiskUsageReadAfterDeletion() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+        try environment.createFile(at: environment.paths.cursorBackup, size: 4_096)
+        let backup = environment.paths.cursorBackup
+        let model = CleanupViewModel(service: CleanupService(
+            paths: environment.paths,
+            isCursorRunning: { false },
+            diskUsageReader: { _ in
+                DiskUsage(
+                    totalCapacity: 1_000_000_000,
+                    availableCapacity: FileManager.default.fileExists(atPath: backup.path)
+                        ? 100_000_000 : 200_000_000
+                )
+            }
+        ))
+        await model.refresh()
+        XCTAssertEqual(model.snapshot.diskUsage?.availableCapacity, 100_000_000)
+        model.setSelected(true, categoryID: .cursorBackup)
+
+        await model.cleanSelected()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: environment.paths.cursorBackup.path))
+        XCTAssertTrue(model.snapshot.category(.cursorBackup).items.isEmpty)
+        let usage = try XCTUnwrap(model.snapshot.diskUsage)
+        XCTAssertEqual(usage.availableCapacity, 200_000_000)
+        XCTAssertEqual(model.message?.title, "Cleanup complete")
+    }
+
+    @MainActor
+    func testCompactionPublishesDiskUsageReadAfterDatabaseReplacement() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+        try environment.createCursorDatabase()
+        _ = try environment.sqliteQuery("INSERT INTO cursorDiskKV VALUES ('agentKv:large', zeroblob(262144));")
+        let database = environment.paths.activeCursorDatabase
+        let model = CleanupViewModel(service: CleanupService(
+            paths: environment.paths,
+            isCursorRunning: { false },
+            diskUsageReader: { _ in
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: database.path),
+                      let size = attributes[.size] as? NSNumber else { return nil }
+                return DiskUsage(totalCapacity: 1_000_000_000, availableCapacity: 1_000_000_000 - size.int64Value)
+            }
+        ))
+        await model.refresh()
+        let before = try XCTUnwrap(model.snapshot.diskUsage)
+
+        await model.compactCursorDatabase()
+
+        XCTAssertEqual(model.message?.title, "Cursor database compacted")
+        XCTAssertEqual(try environment.sqliteQuery("SELECT key FROM cursorDiskKV;"), ["otherSetting"])
+        let usage = try XCTUnwrap(model.snapshot.diskUsage)
+        XCTAssertGreaterThan(usage.availableCapacity, before.availableCapacity)
+        XCTAssertEqual(model.snapshot.cursorDatabase?.availableDiskSpace, usage.availableCapacity)
+    }
+
     func testScanFindsOnlyAllowlistedItemsAndSkipsSymlinks() async throws {
         let environment = try TestEnvironment()
         defer { environment.remove() }

@@ -69,15 +69,18 @@ actor CleanupService {
     private let paths: CleanupPaths
     private let isCursorRunning: @Sendable () -> Bool
     private let sqliteExecutable: URL
+    private let diskUsageReader: @Sendable (URL) -> DiskUsage?
 
     init(
         paths: CleanupPaths = .live,
         isCursorRunning: @escaping @Sendable () -> Bool = CleanupService.detectCursorRunning,
-        sqliteExecutable: URL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        sqliteExecutable: URL = URL(fileURLWithPath: "/usr/bin/sqlite3"),
+        diskUsageReader: @escaping @Sendable (URL) -> DiskUsage? = CleanupService.readDiskUsage
     ) {
         self.paths = paths
         self.isCursorRunning = isCursorRunning
         self.sqliteExecutable = sqliteExecutable
+        self.diskUsageReader = diskUsageReader
     }
 
     func scan() -> CleanupSnapshot {
@@ -100,7 +103,7 @@ actor CleanupService {
         return CleanupSnapshot(
             categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup],
             cursorDatabase: scanCursorDatabase(),
-            diskUsage: scanDiskUsage()
+            diskUsage: diskUsageReader(paths.homeDirectory)
         )
     }
 
@@ -182,18 +185,20 @@ actor CleanupService {
         }
     }
 
-    private func scanDiskUsage() -> DiskUsage? {
-        guard let values = try? paths.homeDirectory.resourceValues(
-            forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]
+    static func readDiskUsage(at url: URL) -> DiskUsage? {
+        // URL volume resource values can stay cached across scans. Query the filesystem
+        // directly so refreshes after deletion or database replacement read current space.
+        guard let attributes = try? FileManager.default.attributesOfFileSystem(
+            forPath: url.path
         ),
-        let total = values.volumeTotalCapacity, total > 0,
-        let available = values.volumeAvailableCapacity else {
+        let total = (attributes[.systemSize] as? NSNumber)?.int64Value, total > 0,
+        let available = (attributes[.systemFreeSize] as? NSNumber)?.int64Value else {
             return nil
         }
 
         return DiskUsage(
-            totalCapacity: Int64(total),
-            availableCapacity: Int64(min(total, max(0, available)))
+            totalCapacity: total,
+            availableCapacity: min(total, max(0, available))
         )
     }
 
@@ -211,15 +216,7 @@ actor CleanupService {
     }
 
     private func volumeAvailableCapacity(at url: URL) -> Int64? {
-        let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        if let capacity = values?.volumeAvailableCapacityForImportantUsage {
-            return capacity
-        }
-        let fallback = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey])
-        if let capacity = fallback?.volumeAvailableCapacity {
-            return Int64(capacity)
-        }
-        return nil
+        diskUsageReader(url)?.availableCapacity
     }
 
     private func rebuildCompactedDatabase(to destination: URL) throws {
