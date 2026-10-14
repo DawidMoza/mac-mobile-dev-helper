@@ -14,11 +14,19 @@ final class AndroidFilesystemViewModel: ObservableObject {
     @Published private(set) var devices: [AndroidDevice] = []
     @Published private(set) var currentDirectory: AndroidRemotePath?
     @Published private(set) var entries: [AndroidFileEntry] = []
+    @Published private(set) var sortColumn: AndroidFileSortColumn = .name
+    @Published private(set) var sortAscending = true
     @Published var selectedSerial: String?
-    @Published var selectedEntryID: String?
+    @Published var selectedEntryIDs: Set<String> = []
     @Published private(set) var isWorking = false
     @Published var message: Message?
-    @Published var pendingDelete: AndroidFileEntry?
+    struct PendingDeletion: Identifiable {
+        let id = UUID()
+        let serial: String
+        let entries: [AndroidFileEntry]
+    }
+
+    @Published var pendingDelete: PendingDeletion?
     @Published private(set) var editorDocument: AndroidEditableDocument?
     @Published var editorText = ""
     @Published var isConfirmingDiscard = false
@@ -41,8 +49,59 @@ final class AndroidFilesystemViewModel: ObservableObject {
         devices.first { $0.serial == selectedSerial }
     }
 
+    var selectedEntries: [AndroidFileEntry] {
+        entries.filter { selectedEntryIDs.contains($0.id) }
+    }
+
     var selectedEntry: AndroidFileEntry? {
-        entries.first { $0.id == selectedEntryID }
+        let selection = selectedEntries
+        return selection.count == 1 ? selection.first : nil
+    }
+
+    func sort(by column: AndroidFileSortColumn) {
+        if sortColumn == column {
+            sortAscending.toggle()
+        } else {
+            sortColumn = column
+            sortAscending = column == .name
+        }
+        sortEntries()
+    }
+
+    private func sortEntries() {
+        let column = sortColumn
+        let ascending = sortAscending
+        entries.sort { lhs, rhs in
+            // Keep the existing folders-first layout in either direction.
+            if lhs.kind.isDirectory != rhs.kind.isDirectory {
+                return lhs.kind.isDirectory
+            }
+            switch column {
+            case .name:
+                let comparison = lhs.name.localizedStandardCompare(rhs.name)
+                if comparison != .orderedSame {
+                    return comparison == (ascending ? .orderedAscending : .orderedDescending)
+                }
+            case .size:
+                // Folder sizes are displayed as a dash; order them by name.
+                if !lhs.kind.isDirectory, lhs.size != rhs.size {
+                    return ascending ? lhs.size < rhs.size : lhs.size > rhs.size
+                }
+            case .modified:
+                switch (lhs.modifiedAt, rhs.modifiedAt) {
+                case (let left?, let right?) where left != right:
+                    return ascending ? left < right : left > right
+                case (_?, nil): return true
+                case (nil, _?): return false
+                default: break
+                }
+            }
+            let nameComparison = lhs.name.localizedStandardCompare(rhs.name)
+            if nameComparison != .orderedSame {
+                return nameComparison == .orderedAscending
+            }
+            return lhs.id < rhs.id
+        }
     }
 
     var editorIsPresented: Bool {
@@ -126,7 +185,7 @@ final class AndroidFilesystemViewModel: ObservableObject {
         selectedSerial = serial
         currentDirectory = nil
         entries = []
-        selectedEntryID = nil
+        selectedEntryIDs = []
         beginOperation(title: "Could not open device") {
             try await self.loadSelectedDevice()
         }
@@ -228,21 +287,35 @@ final class AndroidFilesystemViewModel: ObservableObject {
     }
 
     func requestDeleteSelected() {
-        pendingDelete = selectedEntry
+        guard !isWorking, let serial = selectedSerial, !selectedEntries.isEmpty else { return }
+        pendingDelete = PendingDeletion(serial: serial, entries: selectedEntries)
     }
 
     func confirmDelete() {
-        guard let serial = selectedSerial, let entry = pendingDelete else {
-            return
-        }
+        guard !isWorking, let deletion = pendingDelete else { return }
         pendingDelete = nil
-        beginOperation(title: "Could not delete item") {
-            try await self.service.delete(
-                serial: serial,
-                path: entry.path,
-                isDirectory: entry.kind.isDirectory
-            )
-            try await self.reloadCurrentDirectory()
+        beginOperation(title: "Could not delete selected items") {
+            var failures: [String] = []
+            for entry in deletion.entries {
+                try Task.checkCancellation()
+                do {
+                    try await self.service.delete(
+                        serial: deletion.serial,
+                        path: entry.path,
+                        isDirectory: entry.kind.isDirectory
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    failures.append("\(entry.name): \(error.localizedDescription)")
+                }
+            }
+            if self.selectedSerial == deletion.serial {
+                try await self.reloadCurrentDirectory()
+            }
+            if !failures.isEmpty {
+                self.message = Message(title: "Some items could not be deleted", body: failures.joined(separator: "\n"))
+            }
         }
     }
 
@@ -260,16 +333,25 @@ final class AndroidFilesystemViewModel: ObservableObject {
         }
     }
 
-    func downloadSelected(to destinationURL: URL) {
-        guard let serial = selectedSerial, let selectedEntry else {
-            return
-        }
+    func downloadSelected(to destinationURL: URL, intoDirectory: Bool = false) {
+        let selection = selectedEntries
+        guard !isWorking, let serial = selectedSerial, !selection.isEmpty,
+              intoDirectory || selection.count == 1 else { return }
         beginOperation(title: "Download failed") {
-            try await self.service.download(
-                serial: serial,
-                path: selectedEntry.path,
-                to: destinationURL
-            )
+            let destinations = selection.map { entry in
+                intoDirectory ? destinationURL.appendingPathComponent(entry.name) : destinationURL
+            }
+            // A folder picker does not confirm overwrites, unlike the single-file save panel.
+            if intoDirectory, let existing = destinations.first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+                throw AndroidFilesystemError.destinationExists(existing.path)
+            }
+            for (entry, destination) in zip(selection, destinations) {
+                try Task.checkCancellation()
+                if intoDirectory, FileManager.default.fileExists(atPath: destination.path) {
+                    throw AndroidFilesystemError.destinationExists(destination.path)
+                }
+                try await self.service.download(serial: serial, path: entry.path, to: destination)
+            }
         }
     }
 
@@ -334,7 +416,7 @@ final class AndroidFilesystemViewModel: ObservableObject {
             currentDirectory = nil
             entries = []
             selectedSerial = nil
-            selectedEntryID = nil
+            selectedEntryIDs = []
         } catch {
             // Polling is best-effort. Manual refresh reports actionable failures.
         }
@@ -357,19 +439,20 @@ final class AndroidFilesystemViewModel: ObservableObject {
         guard let selectedDevice else {
             currentDirectory = nil
             entries = []
-            selectedEntryID = nil
+            selectedEntryIDs = []
             return
         }
         guard selectedDevice.state == .connected else {
             currentDirectory = nil
             entries = []
-            selectedEntryID = nil
+            selectedEntryIDs = []
             return
         }
 
         let selectionChanged = selectedSerial != previousSerial
         let becameConnected = previousState != .connected
         if currentDirectory == nil || selectionChanged || becameConnected {
+            selectedEntryIDs = []
             try await loadSelectedDevice()
         }
     }
@@ -379,9 +462,11 @@ final class AndroidFilesystemViewModel: ObservableObject {
             return
         }
         let snapshot = try await service.listDirectory(serial: serial, path: path)
+        let isSameDirectory = currentDirectory == snapshot.path
         currentDirectory = snapshot.path
         entries = snapshot.entries
-        selectedEntryID = nil
+        sortEntries()
+        selectedEntryIDs = isSameDirectory ? selectedEntryIDs.intersection(entries.map(\.id)) : []
     }
 
     private func reloadCurrentDirectory() async throws {
@@ -417,6 +502,7 @@ final class AndroidFilesystemViewModel: ObservableObject {
                     self.devices = []
                     self.currentDirectory = nil
                     self.entries = []
+                    self.selectedEntryIDs = []
                 }
                 self.message = Message(
                     title: title,

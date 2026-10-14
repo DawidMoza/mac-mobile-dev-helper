@@ -4,11 +4,26 @@ import Foundation
 struct CleanupPaths: Sendable {
     let homeDirectory: URL
     let temporaryDirectory: URL
+    var codexHomeOverride: URL? = nil
+    var claudeHomeOverride: URL? = nil
+    var codexSQLiteHomeOverride: URL? = nil
 
     static let live = CleanupPaths(
         homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
-        temporaryDirectory: URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+        temporaryDirectory: URL(fileURLWithPath: "/private/tmp", isDirectory: true),
+        codexHomeOverride: environmentDirectory("CODEX_HOME"),
+        claudeHomeOverride: environmentDirectory("CLAUDE_CONFIG_DIR"),
+        codexSQLiteHomeOverride: environmentDirectory("CODEX_SQLITE_HOME")
     )
+
+    private static func environmentDirectory(_ key: String) -> URL? {
+        guard let value = ProcessInfo.processInfo.environment[key], value.hasPrefix("/") else { return nil }
+        return URL(fileURLWithPath: value, isDirectory: true)
+    }
+
+    var codexHome: URL { codexHomeOverride ?? homeDirectory.appendingPathComponent(".codex") }
+    var claudeHome: URL { claudeHomeOverride ?? homeDirectory.appendingPathComponent(".claude") }
+    var codexSQLiteHome: URL { codexSQLiteHomeOverride ?? codexHome }
 
     var coreDeviceDeltas: URL {
         homeDirectory
@@ -70,17 +85,20 @@ actor CleanupService {
     private let isCursorRunning: @Sendable () -> Bool
     private let sqliteExecutable: URL
     private let diskUsageReader: @Sendable (URL) -> DiskUsage?
+    private let isAgentRunning: @Sendable (CleanupAgent) -> Bool
 
     init(
         paths: CleanupPaths = .live,
         isCursorRunning: @escaping @Sendable () -> Bool = CleanupService.detectCursorRunning,
         sqliteExecutable: URL = URL(fileURLWithPath: "/usr/bin/sqlite3"),
-        diskUsageReader: @escaping @Sendable (URL) -> DiskUsage? = CleanupService.readDiskUsage
+        diskUsageReader: @escaping @Sendable (URL) -> DiskUsage? = CleanupService.readDiskUsage,
+        isAgentRunning: @escaping @Sendable (CleanupAgent) -> Bool = CleanupService.detectAgentRunning
     ) {
         self.paths = paths
         self.isCursorRunning = isCursorRunning
         self.sqliteExecutable = sqliteExecutable
         self.diskUsageReader = diskUsageReader
+        self.isAgentRunning = isAgentRunning
     }
 
     func scan() -> CleanupSnapshot {
@@ -100,10 +118,16 @@ actor CleanupService {
             categoryID: .cursorBackup
         )
 
+        let agentCategories = [CleanupCategoryID.codexCaches, .codexHistory, .claudeCodeCaches, .claudeCodeHistory]
+            .map(scanAgentFiles)
+        let databases = scanCodexDatabases()
         return CleanupSnapshot(
-            categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup],
+            categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup] + agentCategories,
             cursorDatabase: scanCursorDatabase(),
-            diskUsage: diskUsageReader(paths.homeDirectory)
+            diskUsage: diskUsageReader(paths.homeDirectory),
+            codexDatabases: databases.items,
+            runningAgents: Set(CleanupAgent.allCases.filter(isAgentRunning)),
+            agentDatabaseScanErrors: databases.errors
         )
     }
 
@@ -146,8 +170,13 @@ actor CleanupService {
         var removedCount = 0
         var reclaimedSize: Int64 = 0
         var failures: [CleanupFailure] = []
+        let runningAgents = Set(Set(items.compactMap { $0.categoryID.agent }).filter(isAgentRunning))
 
         for item in items {
+            if let agent = item.categoryID.agent, runningAgents.contains(agent) {
+                failures.append(CleanupFailure(path: item.path, message: AgentCleanupError.appIsRunning(agent).localizedDescription))
+                continue
+            }
             guard isAllowedForDeletion(item) else {
                 failures.append(
                     CleanupFailure(path: item.path, message: "The path is outside the cleanup allowlist.")
@@ -330,7 +359,7 @@ actor CleanupService {
     ) throws -> (standardOutput: String, error: String) {
         let process = Process()
         process.executableURL = sqliteExecutable
-        var arguments = ["-noheader"]
+        var arguments = ["-batch", "-bail", "-init", "/dev/null", "-noheader"]
         if let recordSeparator {
             arguments += ["-newline", recordSeparator]
         }
@@ -563,6 +592,227 @@ actor CleanupService {
                 && isRecognizedTemporaryItem(url)
         case .cursorBackup:
             return url == paths.cursorBackup.standardizedFileURL
+        case .codexCaches, .codexHistory, .claudeCodeCaches, .claudeCodeHistory:
+            return isAllowedAgentFile(url, categoryID: item.categoryID)
         }
+    }
+}
+
+private extension CleanupService {
+    struct AgentFileRule {
+        let root: URL
+        var recursive = true
+        var accepts: (URL) -> Bool = { _ in true }
+    }
+
+    func agentFileRules(for category: CleanupCategoryID) -> [AgentFileRule] {
+        switch category {
+        case .codexCaches:
+            return ["log", "logs", "cache", "shell_snapshots"].map {
+                AgentFileRule(root: paths.codexHome.appendingPathComponent($0))
+            } + [AgentFileRule(root: paths.codexHome, recursive: false, accepts: { $0.lastPathComponent == "models_cache.json" })]
+        case .codexHistory:
+            return ["sessions", "archived_sessions"].map {
+                AgentFileRule(root: paths.codexHome.appendingPathComponent($0), accepts: {
+                    $0.lastPathComponent.hasPrefix("rollout-") && $0.pathExtension == "jsonl"
+                })
+            } + [AgentFileRule(root: paths.codexHome, recursive: false, accepts: { $0.lastPathComponent == "history.jsonl" })]
+        case .claudeCodeCaches:
+            return ["debug", "cache"].map {
+                AgentFileRule(root: paths.claudeHome.appendingPathComponent($0))
+            }
+        case .claudeCodeHistory:
+            let projects = paths.claudeHome.appendingPathComponent("projects")
+            return [AgentFileRule(root: projects, accepts: { url in
+                let components = Array(url.standardizedFileURL.pathComponents.dropFirst(projects.standardizedFileURL.pathComponents.count))
+                guard url.pathExtension == "jsonl" else { return false }
+                // Only transcript layouts; never descend into project memory for deletion.
+                if components.count == 2 || (components.count == 3 && components[1] == "sessions") {
+                    return UUID(uuidString: url.deletingPathExtension().lastPathComponent) != nil
+                }
+                return components.count == 4
+                    && UUID(uuidString: components[1]) != nil
+                    && components[2] == "subagents"
+                    && url.lastPathComponent.hasPrefix("agent-")
+            }), AgentFileRule(root: paths.claudeHome, recursive: false, accepts: { $0.lastPathComponent == "history.jsonl" })]
+        default:
+            return []
+        }
+    }
+
+    // Check every component, including ancestors of a configured home. Comparing
+    // only the final path would allow a symlinked directory to escape the allowlist.
+    func hasNoSymlinkComponents(_ url: URL) -> Bool {
+        var current = url.standardizedFileURL
+        while current.path != "/" {
+            if let attributes = try? FileManager.default.attributesOfItem(atPath: current.path),
+               attributes[.type] as? FileAttributeType == .typeSymbolicLink {
+                // macOS uses system aliases for /var and /tmp; these are not user redirects.
+                if current.path != "/var" && current.path != "/tmp" { return false }
+            }
+            current.deleteLastPathComponent()
+        }
+        return true
+    }
+
+    func isAllowedAgentFile(_ url: URL, categoryID: CleanupCategoryID) -> Bool {
+        guard hasNoSymlinkComponents(url),
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+              values.isRegularFile == true else { return false }
+        return agentFileRules(for: categoryID).contains { rule in
+            let root = rule.root.standardizedFileURL
+            let inside = rule.recursive
+                ? url.path.hasPrefix(root.path + "/")
+                : url.deletingLastPathComponent() == root
+            return inside && rule.accepts(url)
+        }
+    }
+
+    func scanAgentFiles(_ category: CleanupCategoryID) -> CleanupCategory {
+        var items: [CleanupItem] = []
+        var errors: [String] = []
+        let keys: [URLResourceKey] = [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey]
+        for rule in agentFileRules(for: category) {
+            guard hasNoSymlinkComponents(rule.root), FileManager.default.fileExists(atPath: rule.root.path) else { continue }
+            guard let enumerator = FileManager.default.enumerator(
+                at: rule.root,
+                includingPropertiesForKeys: keys,
+                options: rule.recursive ? [] : [.skipsSubdirectoryDescendants],
+                errorHandler: { url, error in
+                    errors.append("\(url.path): \(error.localizedDescription)")
+                    return true
+                }
+            ) else { continue }
+            for case let url as URL in enumerator {
+                do {
+                    let values = try url.resourceValues(forKeys: Set(keys))
+                    if values.isSymbolicLink == true {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    guard values.isRegularFile == true, rule.accepts(url) else { continue }
+                    items.append(CleanupItem(categoryID: category, path: url.path, allocatedSize: try allocatedSize(of: url)))
+                } catch {
+                    errors.append("\(url.path): \(error.localizedDescription)")
+                }
+            }
+        }
+        return CleanupCategory(id: category, items: items.sorted { $0.path < $1.path }, scanErrors: errors)
+    }
+
+    func isAllowedCodexDatabase(_ url: URL) -> Bool {
+        guard url.deletingLastPathComponent().standardizedFileURL == paths.codexSQLiteHome.standardizedFileURL,
+              hasNoSymlinkComponents(url), url.pathExtension == "sqlite",
+              let values = try? url.resourceValues(forKeys: [.isRegularFileKey]), values.isRegularFile == true else { return false }
+        let name = url.deletingPathExtension().lastPathComponent
+        return ["state", "logs", "thread_history", "goals", "memories", "queue"].contains { prefix in
+            guard name.hasPrefix(prefix + "_") else { return false }
+            let version = name.dropFirst(prefix.count + 1)
+            return !version.isEmpty && version.allSatisfy { $0.isASCII && $0.isNumber }
+        } && ["-wal", "-shm", "-journal"].allSatisfy {
+            hasNoSymlinkComponents(URL(fileURLWithPath: url.path + $0))
+        }
+    }
+
+    func codexDatabaseStatus(at url: URL) throws -> CodexDatabaseStatus {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        let wal = URL(fileURLWithPath: url.path + "-wal")
+        let walAttributes = try? FileManager.default.attributesOfItem(atPath: wal.path)
+        let walLogicalSize = (walAttributes?[.size] as? NSNumber)?.int64Value ?? 0
+        return CodexDatabaseStatus(
+            path: url.path,
+            allocatedSize: try allocatedSize(of: url),
+            walSize: existingAllocatedSize(at: wal) ?? 0,
+            availableDiskSpace: volumeAvailableCapacity(at: url),
+            requiredFreeSpace: max(64 * 1_024 * 1_024, 2 * (size + walLogicalSize))
+        )
+    }
+
+    func scanCodexDatabases() -> (items: [CodexDatabaseStatus], errors: [String]) {
+        let root = paths.codexSQLiteHome
+        guard hasNoSymlinkComponents(root), FileManager.default.fileExists(atPath: root.path) else { return ([], []) }
+        var items: [CodexDatabaseStatus] = []
+        var errors: [String] = []
+        do {
+            for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+                .sorted(by: { $0.path < $1.path }) where isAllowedCodexDatabase(url) {
+                do {
+                    items.append(try codexDatabaseStatus(at: url))
+                } catch {
+                    errors.append("\(url.path): \(error.localizedDescription)")
+                }
+            }
+        } catch {
+            errors.append("\(root.path): \(error.localizedDescription)")
+        }
+        return (items, errors)
+    }
+}
+
+extension CleanupService {
+    static func detectAgentRunning(_ agent: CleanupAgent) -> Bool {
+        let executableName = agent == .codex ? "codex" : "claude"
+        if NSWorkspace.shared.runningApplications.contains(where: {
+            let name = ($0.localizedName ?? "").lowercased()
+            return name == executableName || name.hasPrefix(executableName + " helper")
+        }) { return true }
+        // NSWorkspace does not include CLI sessions or editor extension processes.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "args="]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return true }
+            return (String(data: data, encoding: .utf8) ?? "").split(whereSeparator: \.isNewline).contains {
+                isAgentProcess(String($0), agent: agent)
+            }
+        } catch {
+            return true
+        }
+    }
+
+    static func isAgentProcess(_ command: String, agent: CleanupAgent) -> Bool {
+        let executableName = agent == .codex ? "codex" : "claude"
+        let tokens = command.lowercased().split(whereSeparator: \.isWhitespace).map(String.init)
+        guard let executable = tokens.first else { return false }
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+        if name == executableName || name.hasPrefix(executableName + "-")
+            || executable.contains("/\(executableName).app/") { return true }
+        if name == "node" || name == "bun" {
+            guard let script = tokens.dropFirst().first(where: { !$0.hasPrefix("-") }) else { return false }
+            let scriptName = URL(fileURLWithPath: script).lastPathComponent
+            return scriptName == executableName || scriptName == executableName + ".js"
+                || (agent == .claudeCode && script.contains("/@anthropic-ai/claude-code/"))
+                || (agent == .codex && script.contains("/@openai/codex/"))
+        }
+        return false
+    }
+
+    func compactCodexDatabase(at path: String) throws -> CursorCompactResult {
+        guard !isAgentRunning(.codex) else { throw AgentCleanupError.appIsRunning(.codex) }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard isAllowedCodexDatabase(url) else { throw AgentCleanupError.invalidDatabase }
+        let before = try codexDatabaseStatus(at: url)
+        guard before.hasEnoughDiskSpace else { throw AgentCleanupError.insufficientSpace }
+        // SQLite manages locking, journaling and WAL recovery. Never remove its
+        // sidecars or replace a database behind another connection's back.
+        let check = try runSQLite(on: url, "PRAGMA integrity_check;", captureOutput: true).standardOutput
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard check == "ok" else { throw CursorCompactError.commandFailed(check) }
+        _ = try runSQLite(on: url, "VACUUM;\nPRAGMA wal_checkpoint(TRUNCATE);", captureOutput: false)
+        let integrity = try runSQLite(on: url, "PRAGMA integrity_check;", captureOutput: true).standardOutput
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard integrity == "ok" else { throw CursorCompactError.commandFailed(integrity) }
+        let after = try codexDatabaseStatus(at: url)
+        return CursorCompactResult(
+            sizeBefore: before.allocatedSize + before.walSize,
+            sizeAfter: after.allocatedSize + after.walSize
+        )
     }
 }

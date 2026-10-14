@@ -190,6 +190,7 @@ struct ContentView: View {
                 diskUsageIndicator
                 cleanupCategories
                 cursorDatabaseNotice
+                CodexDatabaseCleanupView(model: model)
                 actionBar
             }
             .padding(.top, 14)
@@ -292,6 +293,11 @@ struct ContentView: View {
                 Text(category.id.detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if let agent = category.id.agent, model.snapshot.runningAgents.contains(agent) {
+                    Text("Quit \(agent.title), including terminal sessions and editor extensions, then refresh to enable cleanup.")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
                 if let error = category.scanErrors.first {
                     Text(error)
                         .font(.caption)
@@ -423,6 +429,11 @@ private struct CleanupConfirmationView: View {
                 .font(.title2.bold())
 
             Text("\(items.count) item(s), approximately \(CleanupViewModel.format(totalSize)), will be deleted immediately. This does not use the Trash.")
+
+            if items.contains(where: { $0.categoryID.removesConversationHistory }) {
+                Text("Conversation transcripts and prompt history will be permanently lost. Deleted sessions may no longer open or resume.")
+                    .foregroundStyle(.orange)
+            }
 
             if isXcodeRunning {
                 Label(

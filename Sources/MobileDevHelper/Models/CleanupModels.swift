@@ -5,6 +5,10 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
     case xcodeDerivedData
     case mobileBuildTemporaryFiles
     case cursorBackup
+    case codexCaches
+    case codexHistory
+    case claudeCodeCaches
+    case claudeCodeHistory
 
     var id: String { rawValue }
 
@@ -18,6 +22,14 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
             "Mobile build temporary files"
         case .cursorBackup:
             "Cursor database backup"
+        case .codexCaches:
+            "Codex logs & caches"
+        case .codexHistory:
+            "Codex conversation history"
+        case .claudeCodeCaches:
+            "Claude Code debug logs & caches"
+        case .claudeCodeHistory:
+            "Claude Code conversation history"
         }
     }
 
@@ -31,11 +43,70 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
             "Recognized Android, iOS, and Godot build artifacts directly under /private/tmp."
         case .cursorBackup:
             "Cursor's fallback database copy. The active database is compacted separately and never selected here."
+        case .codexCaches:
+            "Log files, cached files, and shell snapshots. Quit Codex and its CLI sessions before deleting."
+        case .codexHistory:
+            "Session and archived transcripts, plus prompt history. Deletion permanently removes local conversations and may leave unavailable chats in the session list."
+        case .claudeCodeCaches:
+            "Debug logs and cached files. Quit Claude Code sessions before deleting."
+        case .claudeCodeHistory:
+            "Session and subagent transcripts, plus prompt history. Deleted conversations can no longer be resumed. Project memory is preserved."
         }
     }
 
     var isSelectedByDefault: Bool {
         false
+    }
+
+    var agent: CleanupAgent? {
+        switch self {
+        case .codexCaches, .codexHistory: .codex
+        case .claudeCodeCaches, .claudeCodeHistory: .claudeCode
+        default: nil
+        }
+    }
+
+    var removesConversationHistory: Bool {
+        self == .codexHistory || self == .claudeCodeHistory
+    }
+}
+
+enum CleanupAgent: String, CaseIterable, Sendable {
+    case codex
+    case claudeCode
+
+    var title: String { self == .codex ? "Codex" : "Claude Code" }
+}
+
+struct CodexDatabaseStatus: Identifiable, Sendable {
+    let path: String
+    let allocatedSize: Int64
+    let walSize: Int64
+    let availableDiskSpace: Int64?
+
+    var id: String { path }
+    // SQLite VACUUM may need up to twice the original database size in free space.
+    let requiredFreeSpace: Int64
+
+    var hasEnoughDiskSpace: Bool {
+        availableDiskSpace.map { $0 >= requiredFreeSpace } ?? true
+    }
+}
+
+enum AgentCleanupError: LocalizedError {
+    case appIsRunning(CleanupAgent)
+    case invalidDatabase
+    case insufficientSpace
+
+    var errorDescription: String? {
+        switch self {
+        case .appIsRunning(let agent):
+            "Quit \(agent.title), including terminal sessions and editor extensions, then refresh and try again."
+        case .invalidDatabase:
+            "The database is missing or outside the Codex database allowlist."
+        case .insufficientSpace:
+            "There is not enough free space to compact this database safely."
+        }
     }
 }
 
@@ -128,6 +199,9 @@ struct CleanupSnapshot: Sendable {
     let categories: [CleanupCategory]
     let cursorDatabase: CursorDatabaseStatus?
     let diskUsage: DiskUsage?
+    var codexDatabases: [CodexDatabaseStatus] = []
+    var runningAgents: Set<CleanupAgent> = []
+    var agentDatabaseScanErrors: [String] = []
 
     var activeCursorDatabaseSize: Int64? {
         cursorDatabase?.allocatedSize

@@ -16,6 +16,9 @@ struct AndroidFilesystemView: View {
                 breadcrumbBar
                 browserToolbar
                 fileList
+                Text("\(model.selectedEntries.count) of \(model.entries.count) item(s) selected · Shift-click a range · Command-click to toggle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
                 connectionGuidance
             }
@@ -66,28 +69,31 @@ struct AndroidFilesystemView: View {
         } message: {
             Text("Enter a new name without slash characters.")
         }
-        .alert(
-            "Delete permanently?",
-            isPresented: Binding(
-                get: { model.pendingDelete != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        model.pendingDelete = nil
+        .sheet(item: $model.pendingDelete) { deletion in
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Delete \(deletion.entries.count) item(s) permanently?")
+                    .font(.title2.bold())
+                Text("These items will be deleted immediately from the phone. This cannot be undone.")
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(deletion.entries) { entry in
+                            Text(entry.path.value)
+                                .font(.callout.monospaced())
+                                .textSelection(.enabled)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            ),
-            presenting: model.pendingDelete
-        ) { _ in
-            Button("Cancel", role: .cancel) {
-                model.pendingDelete = nil
+                HStack {
+                    Spacer()
+                    Button("Cancel") { model.pendingDelete = nil }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Delete Permanently", role: .destructive) { model.confirmDelete() }
+                        .disabled(model.isWorking)
+                }
             }
-            Button("Delete", role: .destructive) {
-                model.confirmDelete()
-            }
-        } message: { entry in
-            Text(
-                "\(entry.path.value) will be deleted immediately from the phone. This cannot be undone."
-            )
+            .padding(24)
+            .frame(width: 600, height: 380)
         }
         .alert(item: $model.message) { message in
             Alert(
@@ -195,7 +201,7 @@ struct AndroidFilesystemView: View {
             } label: {
                 Label("Download", systemImage: "arrow.down.doc")
             }
-            .disabled(model.selectedEntry == nil || model.isWorking)
+            .disabled(model.selectedEntries.isEmpty || model.isWorking)
 
             Button {
                 beginRename()
@@ -209,7 +215,7 @@ struct AndroidFilesystemView: View {
             } label: {
                 Label("Delete", systemImage: "trash")
             }
-            .disabled(model.selectedEntry == nil || model.isWorking)
+            .disabled(model.selectedEntries.isEmpty || model.isWorking)
 
             Spacer()
 
@@ -227,11 +233,11 @@ struct AndroidFilesystemView: View {
     private var fileList: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Name")
+                sortHeader(.name)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text("Size")
+                sortHeader(.size)
                     .frame(width: 90, alignment: .trailing)
-                Text("Modified")
+                sortHeader(.modified)
                     .frame(width: 155, alignment: .trailing)
             }
             .font(.caption)
@@ -254,23 +260,20 @@ struct AndroidFilesystemView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $model.selectedEntryID) {
+                List(selection: $model.selectedEntryIDs) {
                     ForEach(model.entries) { entry in
                         fileRow(entry)
                             .tag(entry.id)
-                            .contextMenu {
-                                entryContextMenu(entry)
-                            }
-                            .onTapGesture(count: 2) {
-                                model.selectedEntryID = entry.id
-                                if entry.kind.isDirectory {
-                                    model.navigate(to: entry.path)
-                                } else if entry.kind.isEditable {
-                                    model.openEditor(for: entry)
-                                }
-                            }
                     }
                 }
+                .contextMenu(forSelectionType: String.self) { ids in
+                    selectionContextMenu(ids)
+                } primaryAction: { ids in
+                    guard !model.isWorking, ids.count == 1 else { return }
+                    model.selectedEntryIDs = ids
+                    model.openSelected()
+                }
+                .disabled(model.isWorking)
                 .listStyle(.inset)
             }
         }
@@ -303,30 +306,56 @@ struct AndroidFilesystemView: View {
         .contentShape(Rectangle())
     }
 
-    @ViewBuilder
-    private func entryContextMenu(_ entry: AndroidFileEntry) -> some View {
-        if entry.kind.isDirectory || entry.kind.isEditable {
-            Button("Open") {
-                model.selectedEntryID = entry.id
-                if entry.kind.isDirectory {
-                    model.navigate(to: entry.path)
-                } else {
-                    model.openEditor(for: entry)
+    private func sortHeader(_ column: AndroidFileSortColumn) -> some View {
+        Button {
+            model.sort(by: column)
+        } label: {
+            HStack(spacing: 4) {
+                Text(column.rawValue)
+                if model.sortColumn == column {
+                    Image(systemName: model.sortAscending ? "chevron.up" : "chevron.down")
+                        .font(.caption2)
+                        .accessibilityHidden(true)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: column == .name ? .leading : .trailing)
+            .contentShape(Rectangle())
         }
-        Button("Download…") {
-            model.selectedEntryID = entry.id
-            chooseDownloadDestination()
-        }
-        Divider()
-        Button("Rename…") {
-            model.selectedEntryID = entry.id
-            beginRename()
-        }
-        Button("Delete…", role: .destructive) {
-            model.selectedEntryID = entry.id
-            model.requestDeleteSelected()
+        .buttonStyle(.plain)
+        .disabled(model.isWorking)
+        .help("Sort by \(column.rawValue.lowercased()); click again to reverse")
+        .accessibilityValue(model.sortColumn == column ? (model.sortAscending ? "Ascending" : "Descending") : "Not sorted")
+    }
+
+    @ViewBuilder
+    private func selectionContextMenu(_ ids: Set<String>) -> some View {
+        let selection = model.entries.filter { ids.contains($0.id) }
+        if !selection.isEmpty {
+            if selection.count == 1, let entry = selection.first {
+                if entry.kind.isDirectory || entry.kind.isEditable {
+                    Button("Open") {
+                        model.selectedEntryIDs = ids
+                        model.openSelected()
+                    }
+                    .disabled(model.isWorking)
+                }
+                Button("Rename…") {
+                    model.selectedEntryIDs = ids
+                    beginRename()
+                }
+                .disabled(model.isWorking)
+            }
+            Button(selection.count == 1 ? "Download…" : "Download \(selection.count) Items…") {
+                model.selectedEntryIDs = ids
+                chooseDownloadDestination()
+            }
+            .disabled(model.isWorking)
+            Divider()
+            Button(selection.count == 1 ? "Delete…" : "Delete \(selection.count) Items…", role: .destructive) {
+                model.selectedEntryIDs = ids
+                model.requestDeleteSelected()
+            }
+            .disabled(model.isWorking)
         }
     }
 
@@ -436,6 +465,19 @@ struct AndroidFilesystemView: View {
     }
 
     private func chooseDownloadDestination() {
+        if model.selectedEntries.count > 1 {
+            let panel = NSOpenPanel()
+            panel.title = "Download \(model.selectedEntries.count) Items from Android"
+            panel.prompt = "Download Here"
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.canCreateDirectories = true
+            panel.allowsMultipleSelection = false
+            if panel.runModal() == .OK, let url = panel.url {
+                model.downloadSelected(to: url, intoDirectory: true)
+            }
+            return
+        }
         guard let entry = model.selectedEntry else {
             return
         }

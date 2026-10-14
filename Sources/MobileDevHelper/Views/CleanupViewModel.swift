@@ -37,7 +37,10 @@ final class CleanupViewModel: ObservableObject {
     }
 
     var canClean: Bool {
-        !selectedItems.isEmpty && !isWorking
+        !selectedItems.isEmpty && !isWorking && !selectedItems.contains {
+            guard let agent = $0.categoryID.agent else { return false }
+            return snapshot.runningAgents.contains(agent)
+        }
     }
 
     var canCompactCursorDatabase: Bool {
@@ -48,6 +51,7 @@ final class CleanupViewModel: ObservableObject {
     }
 
     func refresh() async {
+        guard !isWorking else { return }
         isWorking = true
         workingStatus = "Scanning…"
         snapshot = await service.scan()
@@ -66,6 +70,7 @@ final class CleanupViewModel: ObservableObject {
     }
 
     func cleanSelected() async {
+        guard canClean else { return }
         let items = selectedItems
         guard !items.isEmpty else {
             return
@@ -91,6 +96,7 @@ final class CleanupViewModel: ObservableObject {
     }
 
     func compactCursorDatabase() async {
+        guard canCompactCursorDatabase else { return }
         isWorking = true
         workingStatus = "Compacting the Cursor database… this can take a long time"
         do {
@@ -116,5 +122,26 @@ final class CleanupViewModel: ObservableObject {
             return "0 B"
         }
         return ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
+    }
+
+    func canCompactCodexDatabase(_ database: CodexDatabaseStatus) -> Bool {
+        !isWorking && !snapshot.runningAgents.contains(.codex) && database.hasEnoughDiskSpace
+    }
+
+    func compactCodexDatabase(_ database: CodexDatabaseStatus) async {
+        guard canCompactCodexDatabase(database) else { return }
+        isWorking = true
+        workingStatus = "Compacting the Codex database… this can take a long time"
+        do {
+            let result = try await service.compactCodexDatabase(at: database.path)
+            message = Message(
+                title: "Codex database compacted",
+                body: "Reclaimed approximately \(Self.format(result.reclaimedSize)). Database records were preserved."
+            )
+        } catch {
+            message = Message(title: "Could not compact Codex database", body: error.localizedDescription)
+        }
+        snapshot = await service.scan()
+        isWorking = false
     }
 }

@@ -325,6 +325,9 @@ private struct FakeInvocation: Sendable {
 private actor FakeADBRunner: ADBCommandRunning {
     private var responses: [ADBCommandResult]
     private(set) var invocations: [FakeInvocation] = []
+    private var writesDownloadFiles = false
+
+    func enableDownloadFiles() { writesDownloadFiles = true }
 
     init(responses: [ADBCommandResult]) {
         self.responses = responses
@@ -342,7 +345,11 @@ private actor FakeADBRunner: ADBCommandRunning {
         guard !responses.isEmpty else {
             throw AndroidFilesystemError.commandFailed("Unexpected fake ADB invocation.")
         }
-        return responses.removeFirst()
+        let result = responses.removeFirst()
+        if writesDownloadFiles, result.exitCode == 0, arguments.contains("pull"), let destination = arguments.last {
+            try Data("downloaded test file".utf8).write(to: URL(fileURLWithPath: destination))
+        }
+        return result
     }
 }
 
@@ -388,4 +395,135 @@ private extension ADBCommandResult {
 private func appendField(_ value: String, to data: inout Data) {
     data.append(Data(value.utf8))
     data.append(0)
+}
+
+@MainActor
+extension AdbServiceTests {
+    func testMultipleSelectionKeepsDisplayOrderAndSurvivesFolderRefresh() async throws {
+        let environment = try FakeADBEnvironment(responses:
+            [.success("Android Debug Bridge version 1.0.41")]
+            + folderResponses(names: ["a.txt", "b.txt", "c.txt"])
+            + folderResponses(names: ["b.txt", "c.txt"])
+        )
+        defer { environment.remove() }
+        let model = try await browserModel(environment)
+        model.selectedEntryIDs = ["/storage/emulated/0/c.txt", "/storage/emulated/0/a.txt"]
+        XCTAssertEqual(model.selectedEntries.map(\.name), ["a.txt", "c.txt"])
+        XCTAssertNil(model.selectedEntry)
+
+        model.refreshDirectory()
+        try await waitUntilIdle(model)
+        XCTAssertEqual(model.selectedEntries.map(\.name), ["c.txt"])
+        XCTAssertEqual(model.selectedEntry?.name, "c.txt")
+
+        model.selectDevice(serial: nil)
+        try await waitUntilIdle(model)
+        XCTAssertTrue(model.selectedEntryIDs.isEmpty)
+        XCTAssertTrue(model.selectedEntries.isEmpty)
+    }
+
+    func testBatchDeleteUsesConfirmedSelectionAndReportsIndividualFailures() async throws {
+        let environment = try FakeADBEnvironment(responses:
+            [.success("Android Debug Bridge version 1.0.41")]
+            + folderResponses(names: ["a.txt", "b.txt", "c.txt"])
+            + [
+                .success("/storage/emulated/0/a.txt\0"), .failure("Permission denied"),
+                .success("/storage/emulated/0/c.txt\0"), .success("")
+            ]
+            + folderResponses(names: ["a.txt", "b.txt"])
+        )
+        defer { environment.remove() }
+        let model = try await browserModel(environment)
+        model.selectedEntryIDs = ["/storage/emulated/0/a.txt", "/storage/emulated/0/c.txt"]
+        model.requestDeleteSelected()
+        XCTAssertEqual(model.pendingDelete?.entries.map(\.name), ["a.txt", "c.txt"])
+        // The confirmation captures the target files and device, independently of later selection.
+        model.selectedEntryIDs = ["/storage/emulated/0/b.txt"]
+        model.confirmDelete()
+        try await waitUntilIdle(model)
+
+        let invocations = await environment.runner.invocations
+        let deletions = invocations.filter { $0.arguments.joined(separator: " ").contains("rm -f") }
+        XCTAssertEqual(deletions.count, 2)
+        XCTAssertTrue(deletions[0].arguments.last?.contains("/storage/emulated/0/a.txt") == true)
+        XCTAssertTrue(deletions[1].arguments.last?.contains("/storage/emulated/0/c.txt") == true)
+        XCTAssertTrue(deletions.allSatisfy { $0.arguments.prefix(2) == ["-s", "serial-123"] })
+        XCTAssertEqual(model.message?.title, "Some items could not be deleted")
+        XCTAssertTrue(model.message?.body.contains("a.txt") == true)
+        XCTAssertEqual(model.entries.map(\.name), ["a.txt", "b.txt"])
+        XCTAssertNil(model.pendingDelete)
+    }
+
+    func testBatchDownloadTransfersAllSelectedFilesIntoChosenDirectory() async throws {
+        let environment = try FakeADBEnvironment(responses:
+            [.success("Android Debug Bridge version 1.0.41")]
+            + folderResponses(names: ["a.txt", "b.txt", "c.txt"])
+            + [.success("/storage/emulated/0/a.txt\0"), .success(""), .success("/storage/emulated/0/c.txt\0"), .success("")]
+        )
+        defer { environment.remove() }
+        await environment.runner.enableDownloadFiles()
+        let model = try await browserModel(environment)
+        model.selectedEntryIDs = ["/storage/emulated/0/a.txt", "/storage/emulated/0/c.txt"]
+        let destination = environment.root.appendingPathComponent("downloads")
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        model.downloadSelected(to: destination, intoDirectory: true)
+        try await waitUntilIdle(model)
+
+        XCTAssertNil(model.message)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path).sorted(), ["a.txt", "c.txt"])
+        let invocations = await environment.runner.invocations
+        XCTAssertEqual(invocations.filter { $0.arguments.contains("pull") }.count, 2)
+    }
+
+    func testBatchDownloadRejectsExistingDestinationBeforeTransferringAnyFile() async throws {
+        let environment = try FakeADBEnvironment(responses:
+            [.success("Android Debug Bridge version 1.0.41")]
+            + folderResponses(names: ["a.txt", "b.txt"])
+        )
+        defer { environment.remove() }
+        let model = try await browserModel(environment)
+        model.selectedEntryIDs = Set(model.entries.map(\.id))
+        let existing = environment.root.appendingPathComponent("b.txt")
+        let original = Data("keep my local file".utf8)
+        try original.write(to: existing)
+        model.downloadSelected(to: environment.root, intoDirectory: true)
+        try await waitUntilIdle(model)
+
+        XCTAssertEqual(model.message?.title, "Download failed")
+        XCTAssertEqual(try Data(contentsOf: existing), original)
+        let invocations = await environment.runner.invocations
+        XCTAssertFalse(invocations.contains { $0.arguments.contains("pull") })
+    }
+
+    private func folderResponses(names: [String]) -> [ADBCommandResult] {
+        var listing = Data()
+        for name in names {
+            for field in ["/storage/emulated/0/" + name, "f", "42", "1722852000"] {
+                appendField(field, to: &listing)
+            }
+        }
+        return [
+            .success("List of devices attached\nserial-123 device model:Pixel_9\n"),
+            .success("/storage/emulated/0\0"),
+            .successData(listing)
+        ]
+    }
+
+    private func browserModel(_ environment: FakeADBEnvironment) async throws -> AndroidFilesystemViewModel {
+        let model = AndroidFilesystemViewModel(service: AdbService(runner: environment.runner, locator: environment.locator))
+        model.selectedSerial = "serial-123"
+        model.navigate(to: try AndroidRemotePath(root: "/storage/emulated/0", value: "/storage/emulated/0"))
+        try await waitUntilIdle(model)
+        XCTAssertNil(model.message)
+        return model
+    }
+
+    private func waitUntilIdle(_ model: AndroidFilesystemViewModel) async throws {
+        let deadline = Date().addingTimeInterval(3)
+        while model.isWorking && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertFalse(model.isWorking, "Browser operation timed out")
+    }
 }

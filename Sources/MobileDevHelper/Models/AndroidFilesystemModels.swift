@@ -158,6 +158,12 @@ struct AndroidFileEntry: Identifiable, Hashable, Sendable {
     var name: String { path.name }
 }
 
+enum AndroidFileSortColumn: String {
+    case name = "Name"
+    case size = "Size"
+    case modified = "Modified"
+}
+
 struct AndroidDirectorySnapshot: Sendable {
     let path: AndroidRemotePath
     let entries: [AndroidFileEntry]
