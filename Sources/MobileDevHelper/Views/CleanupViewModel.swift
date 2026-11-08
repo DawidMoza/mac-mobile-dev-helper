@@ -124,24 +124,51 @@ final class CleanupViewModel: ObservableObject {
         return ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
     }
 
-    func canCompactCodexDatabase(_ database: CodexDatabaseStatus) -> Bool {
-        !isWorking && !snapshot.runningAgents.contains(.codex) && database.hasEnoughDiskSpace
+    var codexDatabaseSize: Int64 {
+        snapshot.codexDatabases.reduce(0) { $0 + $1.allocatedSize }
     }
 
-    func compactCodexDatabase(_ database: CodexDatabaseStatus) async {
-        guard canCompactCodexDatabase(database) else { return }
+    var codexDatabaseWALSize: Int64 {
+        snapshot.codexDatabases.reduce(0) { $0 + $1.walSize }
+    }
+
+    var codexCompactionRequiredFreeSpace: Int64 {
+        // Databases share a directory and are compacted one at a time.
+        snapshot.codexDatabases.map(\.requiredFreeSpace).max() ?? 0
+    }
+
+    var canCompactCodexDatabases: Bool {
+        !isWorking && !snapshot.runningAgents.contains(.codex)
+            && !snapshot.codexDatabases.isEmpty
+            && snapshot.codexDatabases.allSatisfy(\.hasEnoughDiskSpace)
+    }
+
+    func compactCodexDatabases() async {
+        guard canCompactCodexDatabases else { return }
+        let databases = snapshot.codexDatabases
         isWorking = true
-        workingStatus = "Compacting the Codex database… this can take a long time"
-        do {
-            let result = try await service.compactCodexDatabase(at: database.path)
-            message = Message(
-                title: "Codex database compacted",
-                body: "Reclaimed approximately \(Self.format(result.reclaimedSize)). Database records were preserved."
-            )
-        } catch {
-            message = Message(title: "Could not compact Codex database", body: error.localizedDescription)
+        var compactedCount = 0
+        var reclaimedSize: Int64 = 0
+        var failures: [String] = []
+        for (index, database) in databases.enumerated() {
+            workingStatus = "Compacting Codex database \(index + 1) of \(databases.count)… this can take a long time"
+            do {
+                let result = try await service.compactCodexDatabase(at: database.path)
+                compactedCount += 1
+                reclaimedSize += result.reclaimedSize
+            } catch {
+                failures.append("\(database.path): \(error.localizedDescription)")
+            }
         }
         snapshot = await service.scan()
         isWorking = false
+        var details = "Compacted \(compactedCount) of \(databases.count) databases and reclaimed approximately \(Self.format(reclaimedSize)). Database records were preserved."
+        if !failures.isEmpty {
+            details += "\n\n\(failures.count) database(s) could not be compacted:\n" + failures.joined(separator: "\n")
+        }
+        message = Message(
+            title: failures.isEmpty ? "Codex databases compacted" : "Codex compaction finished with errors",
+            body: details
+        )
     }
 }

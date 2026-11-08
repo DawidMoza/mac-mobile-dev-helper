@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install.sh | bash
 #
 # Optional tag:
-#   curl -fsSL .../install.sh | bash -s -- v0.1.3
+#   curl -fsSL .../install.sh | bash -s -- v13
 
 set -euo pipefail
 

@@ -39,7 +39,7 @@ final class AppUpdateViewModel: ObservableObject {
            !version.isEmpty {
             currentVersionText = version.hasPrefix("v") ? version : "v\(version)"
         } else {
-            currentVersionText = "v0.0.0"
+            currentVersionText = "v0"
         }
     }
 

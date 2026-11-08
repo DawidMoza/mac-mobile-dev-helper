@@ -89,7 +89,7 @@ actor AppUpdateService {
 
     func currentVersion(
         bundle: Bundle = .main,
-        fallback: String = "0.0.0"
+        fallback: String = "0"
     ) throws -> AppVersion {
         let raw = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         return try AppVersion(raw?.isEmpty == false ? raw! : fallback)

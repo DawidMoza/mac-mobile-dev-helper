@@ -124,23 +124,81 @@ final class AgentCleanupTests: XCTestCase {
     }
 
     @MainActor
-    func testCompactionReclaimsFreePagesPreservesRecordsAndRefreshesSnapshot() async throws {
+    func testBatchCompactionReclaimsFreePagesPreservesRecordsAndRefreshesSnapshot() async throws {
         let fixture = try AgentCleanupFixture()
         defer { fixture.remove() }
         try fixture.createDatabase()
+        let secondDatabase = fixture.url(".codex/logs_2.sqlite")
+        try FileManager.default.copyItem(at: fixture.database, to: secondDatabase)
         let model = CleanupViewModel(service: fixture.service())
         await model.refresh()
-        let before = try XCTUnwrap(model.snapshot.codexDatabases.first)
-        XCTAssertTrue(model.canCompactCodexDatabase(before))
-        await model.compactCodexDatabase(before)
-        let after = try XCTUnwrap(model.snapshot.codexDatabases.first)
-        XCTAssertLessThan(after.allocatedSize, before.allocatedSize)
-        XCTAssertEqual(model.message?.title, "Codex database compacted")
-        XCTAssertEqual(try fixture.sql("SELECT id || ':' || value FROM records;"), "1:keep\n")
-        XCTAssertEqual(try fixture.sql("PRAGMA user_version;"), "42\n")
-        XCTAssertEqual(try fixture.sql("SELECT name FROM sqlite_master WHERE type='index';"), "records_value\n")
-        XCTAssertEqual(try fixture.sql("PRAGMA integrity_check;"), "ok\n")
+        let before = model.snapshot.codexDatabases
+        XCTAssertEqual(before.count, 2)
+        XCTAssertEqual(model.codexDatabaseSize, before.reduce(0) { $0 + $1.allocatedSize })
+        XCTAssertEqual(model.codexDatabaseWALSize, before.reduce(0) { $0 + $1.walSize })
+        XCTAssertEqual(model.codexCompactionRequiredFreeSpace, before.map(\.requiredFreeSpace).max())
+        XCTAssertTrue(model.canCompactCodexDatabases)
+        await model.compactCodexDatabases()
+        XCTAssertEqual(model.snapshot.codexDatabases.count, 2)
+        for database in model.snapshot.codexDatabases {
+            let original = try XCTUnwrap(before.first { $0.path == database.path })
+            XCTAssertLessThan(database.allocatedSize, original.allocatedSize)
+            let url = URL(fileURLWithPath: database.path)
+            XCTAssertEqual(try fixture.sql("SELECT id || ':' || value FROM records;", at: url), "1:keep\n")
+            XCTAssertEqual(try fixture.sql("PRAGMA user_version;", at: url), "42\n")
+            XCTAssertEqual(try fixture.sql("SELECT name FROM sqlite_master WHERE type='index';", at: url), "records_value\n")
+            XCTAssertEqual(try fixture.sql("PRAGMA integrity_check;", at: url), "ok\n")
+        }
+        XCTAssertEqual(model.message?.title, "Codex databases compacted")
+        XCTAssertTrue(model.message?.body.contains("Compacted 2 of 2 databases") == true)
         XCTAssertFalse(model.isWorking)
+    }
+
+    @MainActor
+    func testBatchCompactionReportsFailuresAndContinuesWithRemainingDatabases() async throws {
+        let fixture = try AgentCleanupFixture()
+        defer { fixture.remove() }
+        try fixture.createDatabase()
+        try fixture.file(".codex/logs_2.sqlite")
+        let invalidDatabase = fixture.url(".codex/logs_2.sqlite")
+        let originalData = try Data(contentsOf: invalidDatabase)
+        let model = CleanupViewModel(service: fixture.service())
+        await model.refresh()
+        let before = try XCTUnwrap(model.snapshot.codexDatabases.first { $0.path.hasSuffix("state_5.sqlite") })
+
+        await model.compactCodexDatabases()
+
+        let after = try XCTUnwrap(model.snapshot.codexDatabases.first { $0.path == before.path })
+        XCTAssertLessThan(after.allocatedSize, before.allocatedSize)
+        XCTAssertEqual(try fixture.sql("SELECT value FROM records;"), "keep\n")
+        XCTAssertEqual(try Data(contentsOf: invalidDatabase), originalData)
+        XCTAssertEqual(model.message?.title, "Codex compaction finished with errors")
+        XCTAssertTrue(model.message?.body.contains("Compacted 1 of 2 databases") == true)
+        XCTAssertTrue(model.message?.body.contains("logs_2.sqlite:") == true)
+        XCTAssertFalse(model.isWorking)
+    }
+
+    @MainActor
+    func testBatchCompactionRequiresDatabasesStoppedAgentAndEnoughSpace() async throws {
+        let fixture = try AgentCleanupFixture()
+        defer { fixture.remove() }
+        let emptyModel = CleanupViewModel(service: fixture.service())
+        await emptyModel.refresh()
+        XCTAssertFalse(emptyModel.canCompactCodexDatabases)
+        await emptyModel.compactCodexDatabases()
+        XCTAssertNil(emptyModel.message)
+
+        try fixture.createDatabase()
+        let originalData = try Data(contentsOf: fixture.database)
+        for service in [fixture.service(isRunning: { _ in true }), fixture.service(freeSpace: 1)] {
+            let model = CleanupViewModel(service: service)
+            await model.refresh()
+            XCTAssertFalse(model.canCompactCodexDatabases)
+            await model.compactCodexDatabases()
+            XCTAssertNil(model.message)
+            XCTAssertFalse(model.isWorking)
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.database), originalData)
     }
 
     func testCompactionRejectsRunningAgentLowSpaceUnknownAndSymlinkedDatabases() async throws {
@@ -259,10 +317,10 @@ private final class AgentCleanupFixture {
             DELETE FROM records WHERE id=2;
             """)
     }
-    func sql(_ query: String) throws -> String {
+    func sql(_ query: String, at target: URL? = nil) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
-        process.arguments = ["-batch", "-bail", "-init", "/dev/null", database.path, query]
+        process.arguments = ["-batch", "-bail", "-init", "/dev/null", (target ?? database).path, query]
         let output = Pipe()
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

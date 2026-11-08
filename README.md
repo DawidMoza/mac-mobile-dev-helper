@@ -19,7 +19,7 @@ Requirements:
 To install a specific tagged version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install.sh | bash -s -- v0.1.3
+curl -fsSL https://raw.githubusercontent.com/DawidMoza/mac-mobile-dev-helper/main/scripts/install.sh | bash -s -- v13
 ```
 
 ## Features
@@ -55,7 +55,7 @@ ADB is discovered from `PATH`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the defaul
 - Compact the active Cursor `state.vscdb` after quitting Cursor: copy settings into a new smaller file, omit cached agent/chat blobs, then replace the original
 - Codex log files, caches, shell snapshots, and model cache, with a separate opt-in category for session/archived transcripts and prompt history
 - Claude Code debug logs and caches, with a separate opt-in category for session/subagent transcripts and prompt history
-- Compact recognized Codex SQLite databases (`state`, `logs`, `thread_history`, `goals`, `memories`, and `queue`, with numeric version suffixes) using SQLite `VACUUM`, preserving records
+- One Codex databases entry shows the combined size and expandable file details; compact all recognized SQLite databases (`state`, `logs`, `thread_history`, `goals`, `memories`, and `queue`, with numeric version suffixes) sequentially using SQLite `VACUUM`, preserving records
 
 The active Cursor database file itself, source repositories, simulators, Gradle caches, and Android SDK are never deleted. All cleanup categories are deselected by default. Clearing Xcode caches makes the next build or documentation lookup slower.
 
@@ -99,17 +99,17 @@ Tests use isolated temporary directories and never scan or delete real developer
 
 ## Updates
 
-The app checks GitHub for a newer release at startup and again at most once per day. If an update exists, a top-right button like **Update v0.1.4 -> v0.1.5** appears. Choosing it clones that tag, builds with Swift, replaces the running app bundle, and relaunches.
+The app checks GitHub for a newer release at startup and again at most once per day. If an update exists, a top-right button like **Update v13 -> v14** appears. Choosing it clones that tag, builds with Swift, replaces the running app bundle, and relaunches. Updates from older `v0.1.x` releases remain supported.
 
 Use the top-right **Check for Updates** button (left of the version), or **Mac Mobile Dev Helper → Check for Updates…**, to check immediately. Updating requires network access plus Xcode Command Line Tools (`git` and `swift`).
 
 ## Release
 
-Pushing a version tag such as `v0.1.4` runs tests and publishes GitHub Release notes. Distribution is source-only via the Terminal installer above — no downloadable app zip is attached.
+Releases use sequential integer tags: `v13`, `v14`, `v15`, and so on. `v13` follows the older `v0.1.12` release. Pushing a version tag runs tests and publishes GitHub Release notes. Distribution is source-only via the Terminal installer above — no downloadable app zip is attached.
 
 ```sh
-git tag v0.1.4
-git push origin v0.1.4
+git tag v13
+git push origin v13
 ```
 
 ## License

@@ -13,20 +13,28 @@ final class AppUpdateServiceTests: XCTestCase {
         XCTAssertThrowsError(try AppVersion("latest"))
     }
 
+    func testIntegerVersionsCompareNumericallyAndFollowLegacyReleases() throws {
+        XCTAssertEqual(try AppVersion("13").description, "v13")
+        XCTAssertEqual(try AppVersion("v13").description, "v13")
+        XCTAssertTrue(try AppVersion("v9") < AppVersion("v10"))
+        XCTAssertTrue(try AppVersion("v13") < AppVersion("v14"))
+        XCTAssertTrue(try AppVersion("v0.1.12") < AppVersion("v13"))
+    }
+
     func testParseLatestReleaseReadsTagAndURL() throws {
         let json = """
         {
-          "tag_name": "v0.1.4",
-          "html_url": "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v0.1.4",
+          "tag_name": "v13",
+          "html_url": "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v13",
           "published_at": "2026-08-05T10:00:00Z"
         }
         """.data(using: .utf8)!
 
         let release = try AppUpdateService.parseLatestRelease(json)
-        XCTAssertEqual(release.tag, "v0.1.4")
+        XCTAssertEqual(release.tag, "v13")
         XCTAssertEqual(
             release.htmlURL?.absoluteString,
-            "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v0.1.4"
+            "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v13"
         )
         XCTAssertNotNil(release.publishedAt)
     }
@@ -34,9 +42,9 @@ final class AppUpdateServiceTests: XCTestCase {
     func testParseLatestTagFromRedirectLocation() throws {
         XCTAssertEqual(
             try AppUpdateService.parseLatestTag(
-                fromRedirectLocation: "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v0.1.6"
+                fromRedirectLocation: "https://github.com/DawidMoza/mac-mobile-dev-helper/releases/tag/v13"
             ),
-            "v0.1.6"
+            "v13"
         )
     }
 
@@ -47,6 +55,32 @@ final class AppUpdateServiceTests: XCTestCase {
         aaa111\trefs/tags/v0.1.5
         """
         XCTAssertEqual(try AppUpdateService.parseNewestTag(fromGitRemoteOutput: output), "v0.1.6")
+    }
+
+    func testParseNewestTagOrdersMixedLegacyAndIntegerTags() throws {
+        let output = """
+        abc123\trefs/tags/v0.1.12
+        def456\trefs/tags/v13
+        aaa111\trefs/tags/v9
+        bbb222\trefs/tags/v14
+        ccc333\trefs/tags/v2
+        """
+        XCTAssertEqual(try AppUpdateService.parseNewestTag(fromGitRemoteOutput: output), "v14")
+    }
+
+    func testCheckForUpdateSupportsMigrationAndIntegerReleases() async throws {
+        for (current, latest, expected) in [
+            ("0.1.12", "v13", true),
+            ("13", "v13", false),
+            ("13", "v14", true),
+            ("14", "v13", false),
+            ("13", "v0.1.12", false)
+        ] {
+            let networking = FakeAppUpdateNetworking(response: "{\"tag_name\":\"\(latest)\"}")
+            let service = AppUpdateService(networking: networking)
+            let availability = try await service.checkForUpdate(bundle: FakeVersionBundle(version: current))
+            XCTAssertEqual(availability.isUpdateAvailable, expected, "\(current) -> \(latest)")
+        }
     }
 
     func testLatestReleaseFallsBackWhenPublicRedirectFails() async throws {
@@ -102,16 +136,16 @@ final class AppUpdateServiceTests: XCTestCase {
 
     func testUpdateButtonTitleFormat() throws {
         let availability = AppUpdateAvailability(
-            currentVersion: try AppVersion("0.1.4"),
+            currentVersion: try AppVersion("13"),
             latestRelease: AppReleaseInfo(
-                tag: "v0.2.0",
-                htmlURL: URL(string: "https://example.com/v0.2.0"),
+                tag: "v14",
+                htmlURL: URL(string: "https://example.com/v14"),
                 publishedAt: nil
             )
         )
         XCTAssertEqual(
             "Update \(availability.currentVersion.description) -> \(try availability.latestVersion.description)",
-            "Update v0.1.4 -> v0.2.0"
+            "Update v13 -> v14"
         )
     }
 
