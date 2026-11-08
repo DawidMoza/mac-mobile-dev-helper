@@ -47,6 +47,8 @@ ADB is discovered from `PATH`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the defaul
 
 ### Storage cleanup
 
+Cleanup options are organized into four collapsible groups: **Mobile development**, **Cursor**, **Codex**, and **Claude Code**. Groups start collapsed, and each header shows the available cleanup size plus the selected size and item count. Collapsing a group keeps its selections. Database compaction stays a separate action within its tool's group; conversation history is marked as permanent deletion.
+
 - Overall disk usage with used space, free space, and total capacity; updates on refresh and after cleanup
 - Xcode/CoreDevice incremental app-installation deltas
 - Xcode DerivedData compilation products, module/compilation caches, and documentation indexes

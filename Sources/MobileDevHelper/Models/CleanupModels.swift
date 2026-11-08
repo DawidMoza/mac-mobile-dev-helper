@@ -1,5 +1,23 @@
 import Foundation
 
+enum CleanupGroupID: String, CaseIterable, Identifiable, Sendable {
+    case mobileDevelopment
+    case cursor
+    case codex
+    case claudeCode
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .mobileDevelopment: "Mobile development"
+        case .cursor: "Cursor"
+        case .codex: "Codex"
+        case .claudeCode: "Claude Code"
+        }
+    }
+}
+
 enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
     case coreDeviceDeltas
     case xcodeDerivedData
@@ -56,6 +74,15 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
 
     var isSelectedByDefault: Bool {
         false
+    }
+
+    var group: CleanupGroupID {
+        switch self {
+        case .coreDeviceDeltas, .xcodeDerivedData, .mobileBuildTemporaryFiles: .mobileDevelopment
+        case .cursorBackup: .cursor
+        case .codexCaches, .codexHistory: .codex
+        case .claudeCodeCaches, .claudeCodeHistory: .claudeCode
+        }
     }
 
     var agent: CleanupAgent? {

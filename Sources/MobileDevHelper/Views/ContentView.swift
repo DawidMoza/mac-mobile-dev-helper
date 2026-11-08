@@ -8,6 +8,7 @@ struct ContentView: View {
     @State private var isConfirmingCursorCompact = false
     @State private var isAndroidFilesystemExpanded = true
     @State private var isCleanupExpanded = true
+    @State private var expandedCleanupGroups: Set<CleanupGroupID> = []
     @State private var isPortsExpanded = true
 
     private static let headerIcon: NSImage = {
@@ -188,9 +189,9 @@ struct ContentView: View {
         DisclosureGroup(isExpanded: $isCleanupExpanded) {
             VStack(alignment: .leading, spacing: 14) {
                 diskUsageIndicator
-                cleanupCategories
-                cursorDatabaseNotice
-                CodexDatabaseCleanupView(model: model)
+                ForEach(CleanupGroupID.allCases) { group in
+                    cleanupGroup(group)
+                }
                 actionBar
             }
             .padding(.top, 14)
@@ -258,11 +259,61 @@ struct ContentView: View {
         .help("Storage on the volume containing your home folder. Free space excludes purgeable files.")
     }
 
-    private var cleanupCategories: some View {
+    private func cleanupGroup(_ group: CleanupGroupID) -> some View {
+        let categories = model.snapshot.categories.filter { $0.id.group == group }
+        let availableSize = categories.reduce(Int64(0)) { $0 + $1.totalAllocatedSize }
+        let selectedItems = model.selectedItems.filter { $0.categoryID.group == group }
+        let selectedSize = selectedItems.reduce(Int64(0)) { $0 + $1.allocatedSize }
+
+        return DisclosureGroup(
+            isExpanded: Binding(
+                get: { expandedCleanupGroups.contains(group) },
+                set: { isExpanded in
+                    if isExpanded {
+                        expandedCleanupGroups.insert(group)
+                    } else {
+                        expandedCleanupGroups.remove(group)
+                    }
+                }
+            )
+        ) {
+            VStack(alignment: .leading, spacing: 10) {
+                cleanupCategories(categories)
+                if group == .cursor {
+                    cursorDatabaseNotice
+                } else if group == .codex {
+                    CodexDatabaseCleanupView(model: model)
+                }
+            }
+            .padding(.top, 10)
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(group.title)
+                        .font(.headline)
+                    Text("\(CleanupViewModel.format(availableSize)) available for cleanup")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(CleanupViewModel.format(selectedSize)) selected · \(selectedItems.count) item(s)")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(selectedItems.isEmpty ? Color.secondary : Color.accentColor)
+            }
+        }
+        .padding(14)
+        .background(.background, in: RoundedRectangle(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.quaternary)
+        }
+    }
+
+    private func cleanupCategories(_ categories: [CleanupCategory]) -> some View {
         VStack(spacing: 0) {
-            ForEach(model.snapshot.categories) { category in
+            ForEach(categories) { category in
                 categoryRow(category)
-                if category.id != model.snapshot.categories.last?.id {
+                if category.id != categories.last?.id {
                     Divider()
                 }
             }
@@ -285,6 +336,7 @@ struct ContentView: View {
                 )
             )
             .labelsHidden()
+            .accessibilityLabel(category.id.title)
             .disabled(category.items.isEmpty || model.isWorking)
 
             VStack(alignment: .leading, spacing: 5) {
@@ -293,6 +345,11 @@ struct ContentView: View {
                 Text(category.id.detail)
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                if category.id.removesConversationHistory {
+                    Label("Permanently deletes conversations", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
                 if let agent = category.id.agent, model.snapshot.runningAgents.contains(agent) {
                     Text("Quit \(agent.title), including terminal sessions and editor extensions, then refresh to enable cleanup.")
                         .font(.callout)
