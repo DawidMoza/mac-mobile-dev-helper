@@ -86,6 +86,7 @@ actor CleanupService {
     private let sqliteExecutable: URL
     private let diskUsageReader: @Sendable (URL) -> DiskUsage?
     private let isAgentRunning: @Sendable (CleanupAgent) -> Bool
+    private let customPaths: CustomCleanupPaths
 
     init(
         paths: CleanupPaths = .live,
@@ -99,6 +100,7 @@ actor CleanupService {
         self.sqliteExecutable = sqliteExecutable
         self.diskUsageReader = diskUsageReader
         self.isAgentRunning = isAgentRunning
+        self.customPaths = CustomCleanupPaths(homeDirectory: paths.homeDirectory)
     }
 
     func scan() -> CleanupSnapshot {
@@ -122,13 +124,25 @@ actor CleanupService {
             .map(scanAgentFiles)
         let databases = scanCodexDatabases()
         return CleanupSnapshot(
-            categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup] + agentCategories,
+            categories: [coreDevice, xcodeCaches, temporaryFiles, cursorBackup] + agentCategories + [scanCustomPaths()],
             cursorDatabase: scanCursorDatabase(),
             diskUsage: diskUsageReader(paths.homeDirectory),
             codexDatabases: databases.items,
             runningAgents: Set(CleanupAgent.allCases.filter(isAgentRunning)),
             agentDatabaseScanErrors: databases.errors
         )
+    }
+
+    func readCustomPaths() throws -> String {
+        try customPaths.read()
+    }
+
+    func saveCustomPaths(_ text: String, replacing original: String) throws {
+        try customPaths.save(text, replacing: original)
+    }
+
+    func prepareCustomPathsFileForEditing() throws -> URL {
+        try customPaths.prepareFileForEditing()
     }
 
     func compactCursorDatabase() throws -> CursorCompactResult {
@@ -171,13 +185,16 @@ actor CleanupService {
         var reclaimedSize: Int64 = 0
         var failures: [CleanupFailure] = []
         let runningAgents = Set(Set(items.compactMap { $0.categoryID.agent }).filter(isAgentRunning))
+        let configuredPaths = items.contains { $0.categoryID == .customPaths }
+            ? Set((try? customPaths.configuredPaths().urls.map(\.path)) ?? [])
+            : []
 
         for item in items {
             if let agent = item.categoryID.agent, runningAgents.contains(agent) {
                 failures.append(CleanupFailure(path: item.path, message: AgentCleanupError.appIsRunning(agent).localizedDescription))
                 continue
             }
-            guard isAllowedForDeletion(item) else {
+            guard isAllowedForDeletion(item, configuredPaths: configuredPaths) else {
                 failures.append(
                     CleanupFailure(path: item.path, message: "The path is outside the cleanup allowlist.")
                 )
@@ -189,9 +206,11 @@ actor CleanupService {
             }
 
             do {
-                try fileManager.removeItem(at: URL(fileURLWithPath: item.path))
+                let url = URL(fileURLWithPath: item.path)
+                let size = item.categoryID == .customPaths ? try customTargetSize(at: url) : item.allocatedSize
+                try fileManager.removeItem(at: url)
                 removedCount += 1
-                reclaimedSize += item.allocatedSize
+                reclaimedSize += size
             } catch {
                 failures.append(CleanupFailure(path: item.path, message: error.localizedDescription))
             }
@@ -475,7 +494,7 @@ actor CleanupService {
         return try? allocatedSize(of: url)
     }
 
-    private func allocatedSize(of root: URL) throws -> Int64 {
+    private func allocatedSize(of root: URL, protectingCredentials: Bool = false) throws -> Int64 {
         let keys: Set<URLResourceKey> = [
             .isDirectoryKey,
             .isRegularFileKey,
@@ -492,17 +511,27 @@ actor CleanupService {
             return Int64(rootValues.totalFileAllocatedSize ?? rootValues.fileAllocatedSize ?? 0)
         }
 
+        var traversalError: Error?
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: Array(keys),
             options: [],
-            errorHandler: { _, _ in true }
+            errorHandler: { _, error in
+                if protectingCredentials { traversalError = error }
+                return !protectingCredentials
+            }
         ) else {
+            if protectingCredentials {
+                throw traversalError ?? CocoaError(.fileReadNoPermission, userInfo: [NSFilePathErrorKey: root.path])
+            }
             return 0
         }
 
         var size: Int64 = 0
         for case let url as URL in enumerator {
+            if protectingCredentials, url.lastPathComponent.lowercased() == ".dev" {
+                throw CustomCleanupError.protectedPath
+            }
             let values = try url.resourceValues(forKeys: keys)
             if values.isSymbolicLink == true {
                 enumerator.skipDescendants()
@@ -510,6 +539,7 @@ actor CleanupService {
             }
             size += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
         }
+        if let traversalError { throw traversalError }
         return size
     }
 
@@ -577,7 +607,7 @@ actor CleanupService {
         }
     }
 
-    private func isAllowedForDeletion(_ item: CleanupItem) -> Bool {
+    private func isAllowedForDeletion(_ item: CleanupItem, configuredPaths: Set<String>) -> Bool {
         let url = URL(fileURLWithPath: item.path).standardizedFileURL
         switch item.categoryID {
         case .coreDeviceDeltas:
@@ -594,7 +624,55 @@ actor CleanupService {
             return url == paths.cursorBackup.standardizedFileURL
         case .codexCaches, .codexHistory, .claudeCodeCaches, .claudeCodeHistory:
             return isAllowedAgentFile(url, categoryID: item.categoryID)
+        case .customPaths:
+            return item.path == url.path && configuredPaths.contains(item.path)
         }
+    }
+
+    private func scanCustomPaths() -> CleanupCategory {
+        do {
+            let configuration = try customPaths.configuredPaths()
+            var items: [CleanupItem] = []
+            var errors = configuration.errors
+
+            // Scan parents first so a child covered by a configured folder is counted once.
+            for url in configuration.urls.sorted(by: { $0.path < $1.path }) {
+                guard FileManager.default.fileExists(atPath: url.path),
+                      !items.contains(where: { url.path.hasPrefix($0.path + "/") }) else { continue }
+
+                do {
+                    let size = try customTargetSize(at: url)
+                    items.append(CleanupItem(categoryID: .customPaths, path: url.path, allocatedSize: size))
+                } catch {
+                    errors.append("\(url.path): \(error.localizedDescription)")
+                }
+            }
+            return CleanupCategory(id: .customPaths, items: items, scanErrors: errors)
+        } catch {
+            return CleanupCategory(id: .customPaths, items: [], scanErrors: [error.localizedDescription])
+        }
+    }
+
+    private func customTargetSize(at url: URL) throws -> Int64 {
+        let path = url.path.lowercased()
+        let home = paths.homeDirectory.standardizedFileURL.path.lowercased()
+        let storage = customPaths.fileURL.deletingLastPathComponent().standardizedFileURL.path.lowercased()
+        guard path != "/", path != home, !home.hasPrefix(path + "/"),
+              path != storage, !storage.hasPrefix(path + "/"), !path.hasPrefix(storage + "/"),
+              path != "/system", !path.hasPrefix("/system/"),
+              !url.pathComponents.contains(where: { $0.lowercased() == ".dev" }),
+              hasNoSymlinkComponents(url) else {
+            throw CustomCleanupError.protectedPath
+        }
+
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .volumeURLKey])
+        if values.volume?.standardizedFileURL.path.lowercased() == path {
+            throw CustomCleanupError.protectedPath
+        }
+        guard values.isDirectory == true || values.isRegularFile == true else {
+            throw CustomCleanupError.unsupportedFileType
+        }
+        return try allocatedSize(of: url, protectingCredentials: true)
     }
 }
 

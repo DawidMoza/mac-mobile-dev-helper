@@ -27,9 +27,11 @@ final class CleanupViewModel: ObservableObject {
     }
 
     var selectedItems: [CleanupItem] {
-        snapshot.categories
+        var seen: Set<String> = []
+        return snapshot.categories
             .filter { selectedCategoryIDs.contains($0.id) }
             .flatMap(\.items)
+            .filter { seen.insert($0.path).inserted }
     }
 
     var selectedSize: Int64 {
@@ -54,11 +56,31 @@ final class CleanupViewModel: ObservableObject {
         guard !isWorking else { return }
         isWorking = true
         workingStatus = "Scanning…"
-        snapshot = await service.scan()
+        let updated = await service.scan()
+        let previousCustomItems = snapshot.categories.first { $0.id == .customPaths }?.items
+        let updatedCustomItems = updated.categories.first { $0.id == .customPaths }?.items
+        if previousCustomItems?.map(\.path) != updatedCustomItems?.map(\.path) {
+            selectedCategoryIDs.remove(.customPaths)
+        }
+        snapshot = updated
         isXcodeRunning = !NSRunningApplication
             .runningApplications(withBundleIdentifier: "com.apple.dt.Xcode")
             .isEmpty
         isWorking = false
+    }
+
+    func readCustomPaths() async throws -> String {
+        try await service.readCustomPaths()
+    }
+
+    func saveCustomPaths(_ text: String, replacing original: String) async throws {
+        try await service.saveCustomPaths(text, replacing: original)
+        selectedCategoryIDs.remove(.customPaths)
+    }
+
+    func openCustomPathsFile() async throws {
+        let url = try await service.prepareCustomPathsFileForEditing()
+        guard NSWorkspace.shared.open(url) else { throw CustomCleanupError.couldNotOpenFile }
     }
 
     func setSelected(_ isSelected: Bool, categoryID: CleanupCategoryID) {

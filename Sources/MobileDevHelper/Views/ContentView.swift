@@ -6,6 +6,7 @@ struct ContentView: View {
     @StateObject private var updateModel = AppUpdateViewModel()
     @State private var isConfirmingCleanup = false
     @State private var isConfirmingCursorCompact = false
+    @State private var isEditingCustomPaths = false
     @State private var isAndroidFilesystemExpanded = true
     @State private var isCleanupExpanded = true
     @State private var expandedCleanupGroups: Set<CleanupGroupID> = []
@@ -74,6 +75,12 @@ struct ContentView: View {
                     }
                 }
             )
+        }
+        .sheet(isPresented: $isEditingCustomPaths) {
+            CustomCleanupPathsView(model: model) {
+                isEditingCustomPaths = false
+                Task { await model.refresh() }
+            }
         }
         .sheet(isPresented: $updateModel.isConfirmingUpdate) {
             UpdateConfirmationView(
@@ -283,6 +290,12 @@ struct ContentView: View {
                     cursorDatabaseNotice
                 } else if group == .codex {
                     CodexDatabaseCleanupView(model: model)
+                } else if group == .custom {
+                    Button("Edit Custom Paths…") {
+                        isEditingCustomPaths = true
+                    }
+                    .disabled(model.isWorking)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
             .padding(.top, 10)
@@ -355,8 +368,9 @@ struct ContentView: View {
                         .font(.callout)
                         .foregroundStyle(.orange)
                 }
-                if let error = category.scanErrors.first {
-                    Text(error)
+                let errors = category.id == .customPaths ? category.scanErrors : Array(category.scanErrors.prefix(1))
+                if !errors.isEmpty {
+                    Text(errors.joined(separator: "\n"))
                         .font(.caption)
                         .foregroundStyle(.red)
                         .textSelection(.enabled)

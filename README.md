@@ -47,7 +47,7 @@ ADB is discovered from `PATH`, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or the defaul
 
 ### Storage cleanup
 
-Cleanup options are organized into four collapsible groups: **Mobile development**, **Cursor**, **Codex**, and **Claude Code**. Groups start collapsed, and each header shows the available cleanup size plus the selected size and item count. Collapsing a group keeps its selections. Database compaction stays a separate action within its tool's group; conversation history is marked as permanent deletion.
+Cleanup options are organized into collapsible groups: **Mobile development**, **Cursor**, **Codex**, **Claude Code**, and **Custom Paths**. Groups start collapsed, and each header shows the available cleanup size plus the selected size and item count. Collapsing a group keeps its selections. Database compaction stays a separate action within its tool's group; conversation history is marked as permanent deletion.
 
 - Overall disk usage with used space, free space, and total capacity; updates on refresh and after cleanup
 - Xcode/CoreDevice incremental app-installation deltas
@@ -58,8 +58,11 @@ Cleanup options are organized into four collapsible groups: **Mobile development
 - Codex log files, caches, shell snapshots, and model cache, with a separate opt-in category for session/archived transcripts and prompt history
 - Claude Code debug logs and caches, with a separate opt-in category for session/subagent transcripts and prompt history
 - One Codex databases entry shows the combined size and expandable file details; compact all recognized SQLite databases (`state`, `logs`, `thread_history`, `goals`, `memories`, and `queue`, with numeric version suffixes) sequentially using SQLite `VACUUM`, preserving records
+- Custom files and folders you configure in the app or in a plain-text file
 
-The active Cursor database file itself, source repositories, simulators, Gradle caches, and Android SDK are never deleted. All cleanup categories are deselected by default. Clearing Xcode caches makes the next build or documentation lookup slower.
+The built-in cleanup categories leave the active Cursor database, source repositories, simulators, Gradle caches, and the Android SDK alone. All cleanup categories are deselected by default. Clearing Xcode caches makes the next build or documentation lookup slower.
+
+Open **Storage Cleanup → Custom Paths → Edit Custom Paths…** to edit the list in the app or use **Open Text File** to edit it in your text editor. The UTF-8 file lives at `~/Library/Application Support/Mac Mobile Dev Helper/custom-cleanup-paths.txt` and survives app updates. Enter one absolute or `~/`-relative path per line. Blank lines and lines starting with `#` are ignored. Use **Refresh** after editing externally. A listed folder and its contents are deleted together when you select the custom category and confirm. The list stays saved so recreated files and folders can be cleaned again.
 
 Compacting `state.vscdb` keeps settings and replaces the file in place. In-app chat history may show “Loading Chat…” afterward; transcripts remain under `~/.cursor/projects`. This only needs a little free space for the new copy, so a disk filled by the database can still be compacted. Scanning a multi-gigabyte file can take a long time.
 

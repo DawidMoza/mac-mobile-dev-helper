@@ -5,6 +5,7 @@ enum CleanupGroupID: String, CaseIterable, Identifiable, Sendable {
     case cursor
     case codex
     case claudeCode
+    case custom
 
     var id: String { rawValue }
 
@@ -14,6 +15,7 @@ enum CleanupGroupID: String, CaseIterable, Identifiable, Sendable {
         case .cursor: "Cursor"
         case .codex: "Codex"
         case .claudeCode: "Claude Code"
+        case .custom: "Custom Paths"
         }
     }
 }
@@ -27,6 +29,7 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
     case codexHistory
     case claudeCodeCaches
     case claudeCodeHistory
+    case customPaths
 
     var id: String { rawValue }
 
@@ -48,6 +51,8 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
             "Claude Code debug logs & caches"
         case .claudeCodeHistory:
             "Claude Code conversation history"
+        case .customPaths:
+            "Configured files and folders"
         }
     }
 
@@ -69,6 +74,8 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
             "Debug logs and cached files. Quit Claude Code sessions before deleting."
         case .claudeCodeHistory:
             "Session and subagent transcripts, plus prompt history. Deleted conversations can no longer be resumed. Project memory is preserved."
+        case .customPaths:
+            "A listed folder is deleted with its contents. The saved list stays available for future cleanups."
         }
     }
 
@@ -82,6 +89,7 @@ enum CleanupCategoryID: String, CaseIterable, Identifiable, Sendable {
         case .cursorBackup: .cursor
         case .codexCaches, .codexHistory: .codex
         case .claudeCodeCaches, .claudeCodeHistory: .claudeCode
+        case .customPaths: .custom
         }
     }
 

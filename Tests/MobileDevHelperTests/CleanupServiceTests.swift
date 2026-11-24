@@ -3,6 +3,82 @@ import XCTest
 @testable import MobileDevHelper
 
 final class CleanupServiceTests: XCTestCase {
+    func testCustomPathsPersistAcrossLaunchesAndCanBeCleanedAgain() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+        let fileManager = FileManager.default
+        let output = environment.paths.homeDirectory.appendingPathComponent("my build")
+        let artifact = output.appendingPathComponent("game.ipa")
+        let log = environment.root.appendingPathComponent("build.log")
+        try environment.createFile(at: artifact, size: 4_096)
+        try environment.createFile(at: log, size: 4_096)
+        let config = "# Build output\r\n~/my build\r\n\r\n\(log.path)\r\n\(output.path)/\r\n~/my build/game.ipa\r\nrelative/path\r\n"
+
+        let firstService = CleanupService(paths: environment.paths)
+        let initialText = try await firstService.readCustomPaths()
+        XCTAssertEqual(initialText, "")
+        try await firstService.saveCustomPaths(config, replacing: initialText)
+        let fileURL = try await firstService.prepareCustomPathsFileForEditing()
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), config)
+
+        let relaunched = CleanupService(paths: environment.paths)
+        let snapshot = await relaunched.scan()
+        let category = snapshot.category(.customPaths)
+        XCTAssertEqual(Set(category.items.map(\.path)), [output.path, log.path])
+        XCTAssertEqual(category.scanErrors.count, 1)
+        XCTAssertTrue(category.scanErrors.first?.hasPrefix("Line 7:") == true)
+
+        let result = await relaunched.clean(items: category.items)
+        XCTAssertEqual(result.removedCount, 2)
+        XCTAssertTrue(result.failures.isEmpty)
+        XCTAssertFalse(fileManager.fileExists(atPath: output.path))
+        XCTAssertFalse(fileManager.fileExists(atPath: log.path))
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), config)
+
+        try environment.createFile(at: artifact, size: 4_096)
+        let rescanned = await relaunched.scan()
+        XCTAssertEqual(rescanned.category(.customPaths).items.map(\.path), [output.path])
+    }
+
+    func testCustomCleanupRevalidatesConfigurationAndProtectsCredentialDirectories() async throws {
+        let environment = try TestEnvironment()
+        defer { environment.remove() }
+        let fileManager = FileManager.default
+        let removedFromConfig = environment.paths.homeDirectory.appendingPathComponent("old.log")
+        let build = environment.paths.homeDirectory.appendingPathComponent("build")
+        let credentialMarker = build.appendingPathComponent(".dev/marker")
+        let redirected = environment.paths.homeDirectory.appendingPathComponent("redirected")
+        try environment.createFile(at: removedFromConfig, size: 4_096)
+        try environment.createFile(at: build.appendingPathComponent("output.bin"), size: 4_096)
+        try fileManager.createSymbolicLink(at: redirected, withDestinationURL: build)
+        let service = CleanupService(paths: environment.paths)
+        let config = "~/old.log\n~/build\n~/redirected/output.bin\n"
+        try await service.saveCustomPaths(config, replacing: "")
+        let fileURL = try await service.prepareCustomPathsFileForEditing()
+        let before = await service.scan()
+        XCTAssertEqual(Set(before.category(.customPaths).items.map(\.path)), [removedFromConfig.path, build.path])
+        XCTAssertEqual(before.category(.customPaths).scanErrors.count, 1)
+
+        let externalEdit = "~/build\n"
+        try externalEdit.write(to: fileURL, atomically: true, encoding: .utf8)
+        do {
+            try await service.saveCustomPaths("~/other.log\n", replacing: config)
+            XCTFail("An in-app edit overwrote a newer external edit")
+        } catch CustomCleanupError.configurationChanged {
+            XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), externalEdit)
+        }
+        try environment.createFile(at: credentialMarker, size: 10)
+
+        let result = await service.clean(items: before.category(.customPaths).items)
+        XCTAssertEqual(result.removedCount, 0)
+        XCTAssertEqual(result.failures.count, 2)
+        XCTAssertTrue(fileManager.fileExists(atPath: removedFromConfig.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: credentialMarker.path))
+        let after = await service.scan()
+        XCTAssertTrue(after.category(.customPaths).items.isEmpty)
+        XCTAssertEqual(after.category(.customPaths).scanErrors.count, 1)
+    }
+
     @MainActor
     func testCleanupPublishesDiskUsageReadAfterDeletion() async throws {
         let environment = try TestEnvironment()
